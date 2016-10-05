@@ -117,7 +117,7 @@ class Message extends EventEmitter
       # Default State Active
       @_hidden = false
 
-      # Get Queue Properties
+      # Get REDIS Time
       redis = @system.server
       redis.time (err, rtime) =>
         if err? # HANDLE ERROR
@@ -191,6 +191,99 @@ class Message extends EventEmitter
 
     catch error
       @emit "error", error
+      cb? err, @
+
+    return @
+
+  # TODO: Test
+  delete: (cb) ->
+    try
+      # Do we have the Minimum to Work With?
+      validateMID @_id
+      validateQNAME @_queue
+
+      # Delete Message from System
+      commands = [
+        [ "ZREM",  _this.system._systemKey(["queue", @_queue, "M"]), @_id ]
+        [ "ZREM",  _this.system._systemKey(["queue", @_queue, "H"]), @_id ]
+        [ "DEL", _this.system._systemKey(["messages", @_id]) ]
+      ]
+      @system.server.multi(commands).exec (err, rcmds) =>
+        if err? # HANDLE ERROR
+          @emit "error", err
+          return cb? err, null
+
+        @emit "deleted", msg
+        cb? null, msg
+
+    catch err
+      @emit "error", err
+      cb? err, @
+
+    return @
+
+  # TODO: Test
+  move: (toqueue, cb) ->
+    try
+      # Do we have the Minimum to Work With?
+      validateMID @_id
+      validateQNAME @_queue
+      toqueue= validateQNAME toqueue
+
+      # Is the destination queue different than the current?
+      if @_queue != toqueue # YES
+        redis = @system.server
+        redis.time (err, rtime) =>
+          if err? # HANDLE ERROR
+            @emit "error", error
+            return cb? err, @
+
+          # Remove Message from Current Queue
+          commands = [
+            [ "ZREM",  _this.system._systemKey(["queue", @_queue, "M"]), @_id ]
+            [ "ZREM",  _this.system._systemKey(["queue", @_queue, "H"]), @_id ]
+          ]
+          @system.server.multi(commands).exec (err, rcmds) =>
+            if err? # HANDLE ERROR
+              @emit "error", err
+              return cb? err, null
+
+            # Change the Messages Queue
+            @_queue = toqueue
+            # Unhide Message, if it was hidden
+            @_hidden = false
+            # Save Creation Modification Times to Instance
+            @_modified = rtime[0]
+
+            # HMSET Field<-->Value Pairs
+            hmset = [
+              "HMSET", @system._systemKey(["messages", @_id])
+              "queue", @_queue
+              "hidden", @_hidden
+              "modified", rtime[0]
+            ]
+            
+            commands = [
+              hmset
+              [ "ZADD", @system._systemKey(["queue", @_queue, "M"]), @_created, @_id ]
+              [ "HINCRBY", _this.system._systemKey(["queue", @_queue, "P"]), "received", 1 ]
+            ]
+
+            @system.server.multi(commands).exec (err, rcmds) =>
+              if err? # HANDLE ERROR
+                @emit "error", error
+                return cb? err, @
+
+              # Message Moved
+              @emit "moved", @
+              cb? null, @
+
+      else # NO: Nothing to do
+        @emit "moved", @
+        cb? null, @
+
+    catch err
+      @emit "error", err
       cb? err, @
 
     return @

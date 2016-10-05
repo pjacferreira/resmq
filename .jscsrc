@@ -1,0 +1,13 @@
+{
+  "preset": "jquery",
+  "requireCapitalizedComments": false,
+  "requireDotNotation": false,
+  "requireSpacesInsideParentheses": null,
+  "requireSpacesInsideBrackets": null,
+  "requireSpacesInsideObjectBrackets": null,
+  "requirePaddingNewLinesBeforeLineComments": { "allExcept": "firstAfterCurly" },
+  "requireAlignedMultilineParams": "firstParam",
+  "validateQuoteMarks": "\"",
+  "validateIndentation": {"value": 2, "allExcept": ["comments", "emptyLines"]},
+  "disallowTabs": true
+}

@@ -1,6 +1,6 @@
 
 /*
-Redis Extended Message Queue
+Redis Extended Simple Message Queue
 
 The MIT License (MIT)
 Copyright © 2016 Paulo Ferreira <pf at sourcenotes.com>
@@ -99,7 +99,7 @@ Message = (function(superClass) {
 
   Message._redisProps = ["queue", "message", "hidden", "pcount", "htimeout", "etimeout", "plimit", "created", "modified"];
 
-  Message.newInstance = function(system) {
+  Message.getInstance = function(system) {
     return new Message(system);
   };
 
@@ -369,7 +369,7 @@ Queue = (function(superClass) {
 
   Queue._redisProps = ["htimeout", "etimeout", "plimit", "created", "modified", "received", "sent"];
 
-  Queue.newInstance = function(system, name) {
+  Queue.getInstance = function(system, name) {
     return new Queue(system, name);
   };
 
@@ -384,7 +384,7 @@ Queue = (function(superClass) {
 
   Queue.prototype.post = function(cb, message) {
     var msg;
-    msg = Message.newInstance(this.system);
+    msg = Message.getInstance(this.system);
     msg.on("new", (function(_this) {
       return function(msg) {
         return _this.emit("new-message", msg);
@@ -414,7 +414,7 @@ Queue = (function(superClass) {
             return typeof cb === "function" ? cb(err, _this) : void 0;
           }
           if (messages.length) {
-            return msg = Message.newInstance(_this.system).__load(messages[0], function(err, msg) {
+            return msg = Message.getInstance(_this.system).__load(messages[0], function(err, msg) {
               _this.emit("peek-message", msg);
               return typeof cb === "function" ? cb(null, msg) : void 0;
             });
@@ -442,7 +442,7 @@ Queue = (function(superClass) {
             return typeof cb === "function" ? cb(err, _this) : void 0;
           }
           if (messages.length) {
-            msg = Message.newInstance(_this.system);
+            msg = Message.getInstance(_this.system);
             return msg.__load(messages[0], function(err, msg) {
               var timeout;
               if (err != null) {
@@ -464,6 +464,8 @@ Queue = (function(superClass) {
                 return typeof cb === "function" ? cb(null, msg) : void 0;
               }
             });
+          } else {
+            return _this.emit("message", null);
           }
         });
       };
@@ -488,7 +490,7 @@ Queue = (function(superClass) {
             return typeof cb === "function" ? cb(err, _this) : void 0;
           }
           if (messages.length) {
-            msg = Message.newInstance(_this.system);
+            msg = Message.getInstance(_this.system);
             return msg.__load(messages[0], function(err, msg) {
               var commands;
               if (err != null) {
@@ -566,8 +568,8 @@ Queue = (function(superClass) {
     if (active == null) {
       active = true;
     }
-    msg = Message.newInstance(this.system);
-    msg.newInstance(this.system).on("found", (function(_this) {
+    msg = Message.getInstance(this.system);
+    msg.getInstance(this.system).on("found", (function(_this) {
       return function(err) {
         return _this.emit("error", err);
       };
@@ -804,7 +806,7 @@ System = (function(superClass) {
       cb = options;
       options = null;
     }
-    q = Queue.newInstance(this);
+    q = Queue.getInstance(this);
     return q.on("created", (function(_this) {
       return function(q) {
         _this.emit("queue", q);
@@ -837,7 +839,7 @@ System = (function(superClass) {
   };
 
   System.prototype.queueExists = function(name, cb) {
-    Queue.newInstance(this).exists(cb, name).on("exists", (function(_this) {
+    Queue.getInstance(this).exists(cb, name).on("exists", (function(_this) {
       return function(exists) {
         return _this.emit("queue-exists", name, exists);
       };
@@ -851,7 +853,7 @@ System = (function(superClass) {
 
   System.prototype.message = function(name, cb) {
     var q;
-    q = Queue.newInstance(this);
+    q = Queue.getInstance(this);
     return q.on("message", (function(_this) {
       return function(msg) {
         _this.emit("message", msg);
@@ -881,7 +883,7 @@ System = (function(superClass) {
     } else {
       active = !!active;
     }
-    Message.newInstance(this).find(cb, id, name, active).on("found", (function(_this) {
+    Message.getInstance(this).find(cb, id, name, active).on("found", (function(_this) {
       return function(message) {
         return _this.emit("message-found", message);
       };

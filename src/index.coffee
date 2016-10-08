@@ -1,5 +1,5 @@
 ###
-Redis Extended Message Queue
+Redis Extended Simple Message Queue
 
 The MIT License (MIT)
 Copyright © 2016 Paulo Ferreira <pf at sourcenotes.com>
@@ -88,14 +88,14 @@ validateMID = (id) ->
   return id
 
 class Message extends EventEmitter
-  this._redisProps = [
+  @_redisProps = [
      "queue", "message", "hidden", "pcount",
      "htimeout", "etimeout", "plimit",
      "created", "modified"
   ]
 
   # Create a Message Instance (Allows for Method Chaining)
-  this.newInstance = (system) ->
+  @getInstance = (system) ->
     new Message system
 
   # Constructor
@@ -262,7 +262,7 @@ class Message extends EventEmitter
               "hidden", @_hidden
               "modified", rtime[0]
             ]
-            
+
             commands = [
               hmset
               [ "ZADD", @system._systemKey(["queue", @_queue, "M"]), @_created, @_id ]
@@ -376,13 +376,13 @@ class Message extends EventEmitter
 
 class Queue extends EventEmitter
 
-  this._redisProps = [
+  @_redisProps = [
      "htimeout", "etimeout", "plimit"
      "created", "modified", "received", "sent"
   ]
 
   # Create a Queue Instance (Allows for Method Chaining)
-  this.newInstance = (system,name) ->
+  @getInstance = (system,name) ->
     new Queue system, name
 
   # Constructor
@@ -398,7 +398,7 @@ class Queue extends EventEmitter
 
   # Post Message to Queue
   post: (cb, message) ->
-    msg = Message.newInstance @system
+    msg = Message.getInstance @system
 
     msg
       .on "new", (msg) =>
@@ -438,7 +438,7 @@ class Queue extends EventEmitter
 
         if messages.length
           msg = Message
-                  .newInstance @system
+                  .getInstance @system
                   .__load messages[0], (err, msg) =>
                     @emit "peek-message", msg
                     cb? null, msg
@@ -461,8 +461,9 @@ class Queue extends EventEmitter
           @emit "error", err
           return cb? err, @
 
-        if messages.length
-          msg = Message.newInstance @system
+        # Do we have any messages pending?
+        if messages.length # YES: Get 1st Message in Queue (FIFO Order)
+          msg = Message.getInstance @system
           msg
             .__load messages[0], (err, msg) =>
               if err? # HANDLE ERROR
@@ -482,6 +483,8 @@ class Queue extends EventEmitter
               else # NO: Leave Message Visible in the Queue
                 @emit "message", msg
                 cb? null, msg
+        else # NO: No Messages
+          @emit "message", null
 
     # Return SELF
     return @
@@ -503,7 +506,7 @@ class Queue extends EventEmitter
 
         # Do we have messages awating processing?
         if messages.length # YES
-          msg = Message.newInstance @system
+          msg = Message.getInstance @system
           msg
             .__load messages[0], (err, msg) =>
               if err? # HANDLE ERROR
@@ -582,10 +585,10 @@ class Queue extends EventEmitter
   # @event error Any error generated during search
   # @event message-found Called if Message Found (message) or Not Found (null)
   find: (cb, id, active = true) ->
-    msg = Message.newInstance @system
+    msg = Message.getInstance @system
 
     msg
-      .newInstance @system
+      .getInstance @system
       .on "found", (err) =>
         @emit "error", err
       .on "found", (msg) =>
@@ -814,7 +817,7 @@ class System extends EventEmitter
       cb = options
       options = null
 
-    q = Queue.newInstance @
+    q = Queue.getInstance @
     q
       .on "created", (q) =>
         @emit "queue", q
@@ -841,7 +844,7 @@ class System extends EventEmitter
 
   queueExists: (name, cb) ->
     Queue
-      .newInstance @
+      .getInstance @
       .exists cb, name
       .on "exists", (exists) =>
         @emit "queue-exists", name, exists
@@ -851,7 +854,7 @@ class System extends EventEmitter
     return @
 
   message: (name, cb) ->
-    q = Queue.newInstance @
+    q = Queue.getInstance @
     q
       .on "message", (msg) =>
         @emit "message", msg
@@ -885,7 +888,7 @@ class System extends EventEmitter
       active = !!active
 
     Message
-      .newInstance @
+      .getInstance @
       .find cb, id, name, active
       .on "found", (message) =>
         @emit "message-found", message

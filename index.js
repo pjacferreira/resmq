@@ -465,7 +465,8 @@ Queue = (function(superClass) {
               }
             });
           } else {
-            return _this.emit("message", null);
+            _this.emit("message", null);
+            return typeof cb === "function" ? cb(null, null) : void 0;
           }
         });
       };

@@ -485,6 +485,7 @@ class Queue extends EventEmitter
                 cb? null, msg
         else # NO: No Messages
           @emit "message", null
+          cb? null, null
 
     # Return SELF
     return @

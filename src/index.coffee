@@ -826,6 +826,7 @@ class System extends EventEmitter
 
       # Is the Queue Already in Cache?
       if @_cache.hasOwnProperty name # YES: Use That Object
+        q = @_cache[name]
         @emit "queue", q
         cb? null, q
         return @

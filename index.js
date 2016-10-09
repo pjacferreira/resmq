@@ -812,6 +812,7 @@ System = (function(superClass) {
     try {
       name = validateQNAME(name);
       if (this._cache.hasOwnProperty(name)) {
+        q = this._cache[name];
         this.emit("queue", q);
         if (typeof cb === "function") {
           cb(null, q);

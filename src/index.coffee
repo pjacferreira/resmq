@@ -825,7 +825,7 @@ class System extends EventEmitter
       name = validateQNAME name
 
       # Is the Queue Already in Cache?
-      if _cache.hasOwnProperty name # YES: Use That Object
+      if @_cache.hasOwnProperty name # YES: Use That Object
         @emit "queue", q
         cb? null, q
         return @

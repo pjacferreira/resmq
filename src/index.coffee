@@ -754,6 +754,8 @@ class Queue extends EventEmitter
         cb? null, @
 
 class System extends EventEmitter
+  # System Cache
+  _cache: {}
 
   # Constructor
   constructor: (options = {}, @_ns) ->
@@ -818,30 +820,53 @@ class System extends EventEmitter
       cb = options
       options = null
 
-    q = Queue.getInstance @
-    q
-      .on "created", (q) =>
+    try
+      # Validate Queue Name
+      name = validateQNAME name
+
+      # Is the Queue Already in Cache?
+      if _cache.hasOwnProperty name # YES: Use That Object
         @emit "queue", q
         cb? null, q
-      .on "loaded", (q) =>
-        # TODO Apply Options is not null
-        @emit "queue", q
-        cb? null, q
-      .on "not-found", (name) =>
-        err = new  Error("Queue ["+name+"] not found")
-        @emit "error", err
-        cb? err, null
-      .on "error", (err) =>
-        @emit "error", err
-        cb? err, null
-      .on "exists", (exists) ->
-        # NOTE: We use null as the callback, in order to avoid calling cb twice
-        # when we process the events
-        if exists
-          q._load null, name
-        else
-          q._create null, name, options
-      .exists null, name
+        return @
+
+      q = Queue.getInstance @
+      q
+        .on "created", (q) =>
+          # Cache Entry
+          @_cache[name] = q
+          # TODO: If Queue is Deleted Remove from Cache
+
+          @emit "queue", q
+          cb? null, q
+        .on "loaded", (q) =>
+          # Cache Entry
+          @_cache[name] = q
+          # TODO: If Queue is Deleted Remove from Cache
+
+          @emit "queue", q
+          cb? null, q
+        .on "not-found", (name) =>
+          err = new  Error("Queue ["+name+"] not found")
+          @emit "error", err
+          cb? err, null
+        .on "error", (err) =>
+          @emit "error", err
+          cb? err, null
+        .on "exists", (exists) ->
+          # NOTE: We use null as the callback, in order to avoid calling cb twice
+          # when we process the events
+          if exists
+            q._load null, name
+          else
+            q._create null, name, options
+        .exists null, name
+
+    catch err
+      @emit "error", err
+      cb? err, @
+
+    return @
 
   queueExists: (name, cb) ->
     Queue

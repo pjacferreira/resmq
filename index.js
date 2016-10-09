@@ -733,6 +733,8 @@ Queue = (function(superClass) {
 System = (function(superClass) {
   extend(System, superClass);
 
+  System.prototype._cache = {};
+
   function System(options, _ns1) {
     var opts, ref;
     if (options == null) {
@@ -802,41 +804,60 @@ System = (function(superClass) {
   };
 
   System.prototype.queue = function(name, options, cb) {
-    var q;
+    var err, error1, q;
     if (_.isFunction(options)) {
       cb = options;
       options = null;
     }
-    q = Queue.getInstance(this);
-    return q.on("created", (function(_this) {
-      return function(q) {
-        _this.emit("queue", q);
-        return typeof cb === "function" ? cb(null, q) : void 0;
-      };
-    })(this)).on("loaded", (function(_this) {
-      return function(q) {
-        _this.emit("queue", q);
-        return typeof cb === "function" ? cb(null, q) : void 0;
-      };
-    })(this)).on("not-found", (function(_this) {
-      return function(name) {
-        var err;
-        err = new Error("Queue [" + name + "] not found");
-        _this.emit("error", err);
-        return typeof cb === "function" ? cb(err, null) : void 0;
-      };
-    })(this)).on("error", (function(_this) {
-      return function(err) {
-        _this.emit("error", err);
-        return typeof cb === "function" ? cb(err, null) : void 0;
-      };
-    })(this)).on("exists", function(exists) {
-      if (exists) {
-        return q._load(null, name);
-      } else {
-        return q._create(null, name, options);
+    try {
+      name = validateQNAME(name);
+      if (_cache.hasOwnProperty(name)) {
+        this.emit("queue", q);
+        if (typeof cb === "function") {
+          cb(null, q);
+        }
+        return this;
       }
-    }).exists(null, name);
+      q = Queue.getInstance(this);
+      q.on("created", (function(_this) {
+        return function(q) {
+          _this._cache[name] = q;
+          _this.emit("queue", q);
+          return typeof cb === "function" ? cb(null, q) : void 0;
+        };
+      })(this)).on("loaded", (function(_this) {
+        return function(q) {
+          _this._cache[name] = q;
+          _this.emit("queue", q);
+          return typeof cb === "function" ? cb(null, q) : void 0;
+        };
+      })(this)).on("not-found", (function(_this) {
+        return function(name) {
+          var err;
+          err = new Error("Queue [" + name + "] not found");
+          _this.emit("error", err);
+          return typeof cb === "function" ? cb(err, null) : void 0;
+        };
+      })(this)).on("error", (function(_this) {
+        return function(err) {
+          _this.emit("error", err);
+          return typeof cb === "function" ? cb(err, null) : void 0;
+        };
+      })(this)).on("exists", function(exists) {
+        if (exists) {
+          return q._load(null, name);
+        } else {
+          return q._create(null, name, options);
+        }
+      }).exists(null, name);
+    } catch (error1) {
+      err = error1;
+      this.emit("error", err);
+      if (typeof cb === "function") {
+        cb(err, this);
+      }
+    }
+    return this;
   };
 
   System.prototype.queueExists = function(name, cb) {

@@ -209,8 +209,8 @@ Message = (function(superClass) {
             _this.emit("error", err);
             return typeof cb === "function" ? cb(err, null) : void 0;
           }
-          _this.emit("deleted", msg);
-          return typeof cb === "function" ? cb(null, msg) : void 0;
+          _this.emit("deleted", _this);
+          return typeof cb === "function" ? cb(null, _this) : void 0;
         };
       })(this));
     } catch (error1) {

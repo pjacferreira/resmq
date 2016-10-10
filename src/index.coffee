@@ -213,8 +213,8 @@ class Message extends EventEmitter
           @emit "error", err
           return cb? err, null
 
-        @emit "deleted", msg
-        cb? null, msg
+        @emit "deleted", @
+        cb? null, @
 
     catch err
       @emit "error", err

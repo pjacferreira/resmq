@@ -202,7 +202,7 @@ Message = (function(superClass) {
     try {
       validateMID(this._id);
       validateQNAME(this._queue);
-      commands = [["ZREM", _this.system._systemKey(["queue", this._queue, "M"]), this._id], ["ZREM", _this.system._systemKey(["queue", this._queue, "H"]), this._id], ["DEL", _this.system._systemKey(["messages", this._id])]];
+      commands = [["ZREM", this.system._systemKey(["queue", this._queue, "M"]), this._id], ["ZREM", this.system._systemKey(["queue", this._queue, "H"]), this._id], ["DEL", this.system._systemKey(["messages", this._id])]];
       this.system.server.multi(commands).exec((function(_this) {
         return function(err, rcmds) {
           if (err != null) {

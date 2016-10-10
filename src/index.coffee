@@ -204,9 +204,9 @@ class Message extends EventEmitter
 
       # Delete Message from System
       commands = [
-        [ "ZREM",  _this.system._systemKey(["queue", @_queue, "M"]), @_id ]
-        [ "ZREM",  _this.system._systemKey(["queue", @_queue, "H"]), @_id ]
-        [ "DEL", _this.system._systemKey(["messages", @_id]) ]
+        [ "ZREM",  @system._systemKey(["queue", @_queue, "M"]), @_id ]
+        [ "ZREM",  @system._systemKey(["queue", @_queue, "H"]), @_id ]
+        [ "DEL",   @system._systemKey(["messages", @_id]) ]
       ]
       @system.server.multi(commands).exec (err, rcmds) =>
         if err? # HANDLE ERROR

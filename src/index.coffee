@@ -81,7 +81,7 @@ validateQNAME = (name) ->
 validateMID = (id) ->
   # Validate Message ID
   id = nullOnEmpty id
-  if not name?
+  if not id?
     throw new Error "MISSING Message ID [id]"
   else if not _VALIDATORS.id.test id
     throw new Error "INVALID Message ID [id]"

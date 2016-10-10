@@ -86,7 +86,7 @@ validateQNAME = function(name) {
 
 validateMID = function(id) {
   id = nullOnEmpty(id);
-  if (typeof name === "undefined" || name === null) {
+  if (id == null) {
     throw new Error("MISSING Message ID [id]");
   } else if (!_VALIDATORS.id.test(id)) {
     throw new Error("INVALID Message ID [id]");

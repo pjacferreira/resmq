@@ -735,6 +735,10 @@ System = (function(superClass) {
 
   System.prototype._cache = {};
 
+  System.getInstance = function(options, ns) {
+    return new System(options, ns);
+  };
+
   function System(options, _ns1) {
     var opts, ref;
     if (options == null) {

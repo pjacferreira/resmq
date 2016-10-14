@@ -757,6 +757,10 @@ class System extends EventEmitter
   # System Cache
   _cache: {}
 
+  # Create a Message Instance (Allows for Method Chaining)
+  @getInstance = (options, ns) ->
+    new System options, ns
+
   # Constructor
   constructor: (options = {}, @_ns) ->
     # Do we want a separate namespace for the System?

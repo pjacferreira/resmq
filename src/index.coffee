@@ -94,6 +94,132 @@ class Message extends EventEmitter
      "created", "modified"
   ]
 
+  @__load: (system, id, cb)->
+    # Get Message Properties
+    key = system._systemKey ["messages", id]
+
+    # REDIS: Get Message Properties
+    system._redis.hmget key, Message._redisProps, (error, resp) ->
+      if error? # HANDLE ERROR
+        return cb error
+
+      # Does the Message Exist?
+      if resp.length
+        # Create Queue Instance
+        m = Message.getInstance system
+
+        # Extract Message Properties
+        m._id                = id
+        m._props["queue"]    = resp[0]
+        m._props["message"]  = resp[1]
+        m._props["hidden"]   = !!resp[2]
+        m._props["pcount"]   = if resp[3]? then parseInt(resp[3], 10) else null
+        m._props["htimeout"] = if resp[4]? then parseInt(resp[4], 10) else null
+        m._props["etimeout"] = if resp[5]? then parseInt(resp[5], 10) else null
+        m._props["plimit"]   = if resp[6]? then parseInt(resp[6], 10) else null
+        m._props["created"]  = parseInt(resp[7], 10)
+        m._props["modified"] = parseInt(resp[8], 10)
+
+        # Found a Valid Message
+        return cb null, m
+
+      # ELSE: No Valid Message Found
+      cb null, null
+
+  @__create: (system, queue, message, props = {}, cb) ->
+    redis = system._redis
+
+    # Get REDIS Time
+    redis.time (err, rtime) ->
+      if error? # HANDLE ERROR
+        return cb error, null
+
+      # Generate Message ID
+      id = genID()
+
+      # Field<-->Value Pairs
+      hmset = [ "HMSET", system._systemKey ["messages", id] ]
+
+      # Message Properties
+      props = { hidden: false }
+      hmset.push "hidden", false
+
+      # Transfer Known Properties to HMSET
+      _.forOwn props, (value,key) ->
+        if _.indexOf(Message._redisProps, key) >= 0
+          hmset.push key, props[key] = value
+
+      # Creation Time : (UNIX TIMESTAMP)+SERVER MICROSENDOS
+      created = parseInt(rtime[0], 10)*1000000+parseInt(rtime[1], 10)
+
+      # Save Instance Properties to Redis Properties
+      hmset.push "queue", props["queue"] = queue
+      hmset.push "message", props["message"] = message
+      hmset.push "created", props["created"] = created
+      hmset.push "modified", props["modified"] = created
+
+      commands = [
+        hmset
+        [ "ZADD", system._systemKey(["queue", queue, "M"]), created, id ]
+        [ "HINCRBY", system._systemKey(["queue", queue, "P"]), "received", 1 ]
+      ]
+
+      redis.multi(commands).exec (error, rcmds) ->
+        if error? # HANDLE ERROR
+          return cb error, null
+
+        # Create Message Instance
+        m = Message.getInstance system
+
+        # Extract Message Properties
+        m._id       = id
+        m._props    = props
+
+        # Found a Valid Message
+        return cb null, m
+
+  @__delete: (system, queue, id, cb) ->
+    redis = system._redis
+
+    commands = [
+      [ "ZREM",  system._systemKey(["queue", queue, "M"]), id ]
+      [ "ZREM",  system._systemKey(["queue", queue, "H"]), id ]
+      [ "DEL",   system._systemKey(["messages", id]) ]
+    ]
+
+    redis.multi(commands).exec (error, rcmds) ->
+      if error? # HANDLE ERROR
+        return cb error
+
+      cb null, id
+
+  @__findInAll: (system, id, active, cb) ->
+    Message.__load system, id, (error, m) ->
+      if error? # HANDLE ERROR
+        return cb error
+
+      # Do we have a Message in the Correct State?
+      if m? and (!active or !m._props.hidden)  # YES
+        # Found a Valid Message
+        return cb null, msg
+      # ELSE: No Valid Message Found
+      cb null, null
+
+  @__updateProperty: (system, id, pname, pvalue, cb) ->
+    # REDIS: Set Message Properties
+    key = system._systemKey(["messages", id])
+    system._redis.hmset key, pname, pvalue, (error, resp) ->
+      if error? # HANDLE ERROR
+        cb error
+
+      return cb null, true
+
+  # Message ID
+  _id: null
+
+  # REDIS Message Properties
+  _props: {}
+
   # Create a Message Instance (Allows for Method Chaining)
   @getInstance = (system) ->
     new Message system
@@ -101,278 +227,149 @@ class Message extends EventEmitter
   # Constructor
   constructor: (@system) ->
 
-  post: (cb, queue, message, props = {}) ->
-    try
-      # Validate Message ID
-      @_queue = validateQNAME queue
+  id: ->
+    return @_id
 
-      # Genreate Message ID
-      @_id = genID()
+  message: ->
+    return @_props.message
 
-      # Cleanup Message Text
-      @_message  = nullOnEmpty message
-      if not message?
-        throw new Error "INVALID Parameter Value [message]"
+  queue: ->
+    return @_props.queue
 
-      # Default State Active
-      @_hidden = false
 
-      # Get REDIS Time
-      redis = @system.server
-      redis.time (err, rtime) =>
-        if err? # HANDLE ERROR
-          @emit "error", error
-          return cb? err, @
+  update: (message, cb) ->
+    # Validate 'message' Parameter
+    message = nullOnEmpty message
+    if !message?
+      throw new Error("Parameter [message] is NOT a String or is an Empty String")
 
-        # Field<-->Value Pairs
-        hmset = [ "HMSET", @system._systemKey ["messages", @_id] ]
+    # Validate 'cb'
+    cb = if _.isFunction(cb) then cb else null
 
-        # Save Properties to Instance
-        _.forOwn props, (value,key) =>
-          switch key
-            when "pcount"
-              @_pcount = value
-              hmset.push key, value
-            when "htimeout"
-              @_htimeout = value
-              hmset.push key, value
-            when "etimeout"
-              @_etimeout = value
-              hmset.push key, value
-            when "plimit"
-              @_plimit = value
-              hmset.push key, value
+    Message.__updateProperty @system, @_id, "message", message, (error, ok) =>
+      # HANDLE ERROR
+      if error?
+        @emit "error", error
+        return cb? error, @
 
-        # Save Creation Modification Times to Instance
-        @_created = rtime[0]
-        @_modified = rtime[0]
+      if ok
+        # Update Message Parameter
+        old = @_props["message"]
+        @_props["message"] = message
 
-        # Save Instance Properties to Redis Properties
-        hmset.push "queue", @_queue
-        hmset.push "message", @_message
-        hmset.push "hidden", !!@_hidden
-        hmset.push "created", rtime[0]
-        hmset.push "modified", rtime[0]
-
-        commands = [
-          hmset
-          [ "ZADD", @system._systemKey(["queue", @_queue, "M"]), @_created, @_id ]
-          [ "HINCRBY", _this.system._systemKey(["queue", @_queue, "P"]), "received", 1 ]
-        ]
-
-        @system.server.multi(commands).exec (err, rcmds) =>
-          if err? # HANDLE ERROR
-            @emit "error", error
-            return cb? err, @
-
-          # Found a Valid Message
-          @emit "new", @
-          return cb? null, @
-
-    catch error
-      @emit "error", error
-      cb? err, @
-
-    return @
-
-  find: (cb, id, qname, active = true) ->
-    try
-      # Validate Message ID
-      id = validateMID id
-
-      # Validate Queue NAME (if given)
-      qname = qname ? validateQNAME qname
-
-      # Try to Find the Message
-      if qname?
-        @_findInQueue(cb, id, queue, active)
+        @emit "updated", @, "message", old
+        return cb? error, @, "message", old
       else
-        @_findInAll(cb, id, active)
-
-    catch error
-      @emit "error", error
-      cb? err, @
+        error = new Error "Failed to Update [message] in Message ["+@_id+"]"
+        @emit "error", error
+        return cb? error, @
 
     return @
 
-  # TODO: Test
+  updateJSON: (json, cb) ->
+    # Validate 'json' Parameter
+    if _.isPlainObject json
+      return @update JSON.stringify(json), cb
+
+    throw new Error("Parameter [json] is Missing or is not an Object")
+
   delete: (cb) ->
-    try
-      # Do we have the Minimum to Work With?
-      validateMID @_id
-      validateQNAME @_queue
 
-      # Delete Message from System
-      commands = [
-        [ "ZREM",  @system._systemKey(["queue", @_queue, "M"]), @_id ]
-        [ "ZREM",  @system._systemKey(["queue", @_queue, "H"]), @_id ]
-        [ "DEL",   @system._systemKey(["messages", @_id]) ]
-      ]
-      @system.server.multi(commands).exec (err, rcmds) =>
-        if err? # HANDLE ERROR
-          @emit "error", err
-          return cb? err, null
+    Message.__delete @system, @_props.queue, @_id, (error, id) =>
+      if error? # HANDLE ERROR
+        @emit "error", error
+        cb? error
 
-        @emit "deleted", @
-        cb? null, @
-
-    catch err
-      @emit "error", err
-      cb? err, @
+      @emit "deleted", @
+      cb? null, @
 
     return @
 
-  # TODO: Test
   move: (toqueue, cb) ->
-    try
-      # Do we have the Minimum to Work With?
-      validateMID @_id
-      validateQNAME @_queue
-      toqueue= validateQNAME toqueue
+    # Do we have the Minimum to Work With?
+    toqueue= validateQNAME toqueue
 
-      # Is the destination queue different than the current?
-      if @_queue != toqueue # YES
-        redis = @system.server
-        redis.time (err, rtime) =>
-          if err? # HANDLE ERROR
+    # Is the destination queue different than the current?
+    if @_props.queue != toqueue # YES
+
+      Queue.__exists @system, toqueue, (error, exists) =>
+        if error? # HANDLE ERROR
+          @emit "error", error
+          cb? error
+
+        if !exists
+          error = new Error "Destination queue ["+toqueue+"] does not exist"
+          @emit "error", error
+          cb? error
+
+        Queue.__removeMessage @system, @_props.queue, @_id, (error, id) =>
+          if error? # HANDLE ERROR
             @emit "error", error
-            return cb? err, @
+            cb? error
 
-          # Remove Message from Current Queue
-          commands = [
-            [ "ZREM",  _this.system._systemKey(["queue", @_queue, "M"]), @_id ]
-            [ "ZREM",  _this.system._systemKey(["queue", @_queue, "H"]), @_id ]
-          ]
-          @system.server.multi(commands).exec (err, rcmds) =>
-            if err? # HANDLE ERROR
-              @emit "error", err
-              return cb? err, null
+          Queue.__addMessage @system, toqueue, @_id, (error, id) =>
+            if error? # HANDLE ERROR
+              @emit "error", error
+              cb? error
 
-            # Change the Messages Queue
-            @_queue = toqueue
-            # Unhide Message, if it was hidden
-            @_hidden = false
-            # Save Creation Modification Times to Instance
-            @_modified = rtime[0]
+            # Message Moved
+            @emit "moved", @
+            cb? null, @
 
-            # HMSET Field<-->Value Pairs
-            hmset = [
-              "HMSET", @system._systemKey(["messages", @_id])
-              "queue", @_queue
-              "hidden", @_hidden
-              "modified", rtime[0]
-            ]
-
-            commands = [
-              hmset
-              [ "ZADD", @system._systemKey(["queue", @_queue, "M"]), @_created, @_id ]
-              [ "HINCRBY", _this.system._systemKey(["queue", @_queue, "P"]), "received", 1 ]
-            ]
-
-            @system.server.multi(commands).exec (err, rcmds) =>
-              if err? # HANDLE ERROR
-                @emit "error", error
-                return cb? err, @
-
-              # Message Moved
-              @emit "moved", @
-              cb? null, @
-
-      else # NO: Nothing to do
-        @emit "moved", @
-        cb? null, @
-
-    catch err
-      @emit "error", err
-      cb? err, @
+    else # NO: Nothing to do
+      @emit "moved", @
+      cb? null, @
 
     return @
 
-  _findInAll: (cb, id, active) ->
-    @__load id, (err, msg) =>
-      if err? # HANDLE ERROR
+  hide: (toqueue, cb) ->
+    # Does the Message have a Hide Timeout
+    timeout = if @_props.htimeout? then @_props.htimeout else _DEFAULTS.queue.htimeout
+
+    # TODO: Handle Situation in Which Message Doesn't have a hide timeout, BUT
+    # the Queue has non default timeout
+    Queue.__hideMessage @system, @_props.queue, @_id, timeout, (error, hidden) =>
+      if error? # HANDLE ERROR
         @emit "error", error
-        return cb? err, msg
+        cb? error
 
-      # Do we have a Message in the Correct State?
-      if msg? and (!active or !msg._hidden)  # YES
-        # Found a Valid Message
-        @emit "found", msg
-        return cb? null, msg
-
-      # ELSE: No Valid Message Found
-      @emit "found"
-      cb? null, null
+      # Message Hidden
+      @emit "hidden", @
+      cb? null, @
 
     return @
 
-  _findInQueue: (cb, id, queue)->
-    @__load id, (err, msg) =>
-      if err? # HANDLE ERROR
-        @emit "error", error
-        return cb? err, msg
-
-      # Do we have a Message in the Correct Queue and State?
-      if msg? and (msg._queue == queue) and (!active or !msg._hidden)  # YES
-        # Found a Valid Message
-        @emit "found", msg
-        return cb? null, msg
-
-      # ELSE: No Valid Message Found
-      @emit "found"
-      cb? null, null
-
-    return @
-
-  __load: (id, cb)->
+  refresh: (cb) ->
     # Get Message Properties
-    key = @system._systemKey ["messages", id]
-    @system.server.hmget key, Message._redisProps, (err, resp) =>
-      if err? # HANDLE ERROR
-        return cb? err, @
+    key = @system._systemKey ["messages", @_id]
+
+    # REDIS: Get Message Properties
+    @system._redis.hmget key, Message._redisProps, (error, resp) =>
+      if error? # HANDLE ERROR
+        @emit "error", error
+        cb? error
 
       # Does the Message Exist?
       if resp.length
         # Extract Message Properties
-        @_id       = id
-        @_queue    = resp[0]
-        @_message  = resp[1]
-        @_hidden   = !!resp[2]
-        @_pcount   = if resp[3]? then parseInt(resp[3], 10) else null
-        @_htimeout = if resp[4]? then parseInt(resp[4], 10) else null
-        @_etimeout = if resp[5]? then parseInt(resp[5], 10) else null
-        @_plimit   = if resp[6]? then parseInt(resp[6], 10) else null
-        @_created  = parseInt(resp[7], 10)
-        @_modified = parseInt(resp[8], 10)
+        @_props["message"]  = resp[1]
+        @_props["hidden"]   = !!resp[2]
+        @_props["pcount"]   = if resp[3]? then parseInt(resp[3], 10) else null
+        @_props["htimeout"] = if resp[4]? then parseInt(resp[4], 10) else null
+        @_props["etimeout"] = if resp[5]? then parseInt(resp[5], 10) else null
+        @_props["plimit"]   = if resp[6]? then parseInt(resp[6], 10) else null
+        @_props["created"]  = parseInt(resp[7], 10)
+        @_props["modified"] = parseInt(resp[8], 10)
 
         # Found a Valid Message
-        return cb? null, @
+        return cb null, @
 
-      # ELSE: No Valid Message Found
-      cb? null, null
+      # ELSE: No Valid Message Found !?
+      error = new Error "Invalid Message [" + @_id + "]"
+      @emit "error", error
+      cb? error
 
     return @
-
-  __hide: (timeout, cb)=>
-    # Get Current Redis Server TIME
-    @system.server.time (err, rtime) =>
-      if err? # HANDLE ERROR
-        return cb? err, null
-
-      timeout = rtime[0] + timeout
-      commands = [
-        [ "ZREM",  _this.system._systemKey(["queue", @_queue, "M"]), @_id ]
-        [ "ZADD",  _this.system._systemKey(["queue", @_queue, "H"]), timeout, @_id ]
-        [ "HSET", _this.system._systemKey(["messages", @_id]),      "hidden", 1 ]
-      ]
-
-      @system.server.multi(commands).exec (err, rcmds) =>
-        if err? # HANDLE ERROR
-          return cb? err, null
-
-        @_hidden = true
-        cb? null, _this
-
 
 class Queue extends EventEmitter
 
@@ -381,8 +378,232 @@ class Queue extends EventEmitter
      "created", "modified", "received", "sent"
   ]
 
+  # Does Queue Exist
+  @__list: (system, cb) ->
+    # REDIS : List Members of Set
+    system._redis.smembers system._systemKey("queues"), (error, resp) ->
+      if error? # HANDLE ERROR
+        return cb error
+
+      # TODO: Return Empty Array if Response is Null?
+      cb null, resp
+
+  @__loadOrCreate: (system, name, options, cb) ->
+
+    Queue.__exists system, name, (error, exists) ->
+      if error? # HANDLE ERROR
+        return cb error, null
+
+      if exists
+        Queue.__load system, name, cb
+      else
+        Queue.__create system, name, options, cb
+
+  # Does Queue Exist
+  @__exists: (system, name, cb) ->
+    # Get Key Name
+    key = system._systemKey ["queue", name, "P"]
+
+    # REDIS: Does Key Exist?
+    system._redis.exists key, (err, resp) ->
+      if err? # HANDLE ERROR
+        return cb err, null
+
+      exists = !!resp
+      cb null, exists
+
+    return @
+
+  @__load: (system, name, cb) ->
+    # Get Key Name
+    key = system._systemKey ["queue", name, "P"]
+
+    # REDIS: Get Queue Properties
+    system._redis.hmget key, Queue._redisProps, (error, resp) ->
+      if error? # HANDLE ERROR
+        return cb error
+
+      if resp.length
+        # Create Queue Instance
+        q = Queue.getInstance system, name
+
+        # Set Queue Properties
+        q._htimeout= parseInt(resp[0], 10)
+        q._etimeout= parseInt(resp[1], 10) or 0
+        q._plimit= parseInt(resp[2], 10) or 0
+        q._created= parseInt(resp[3], 10)
+        q._modified= parseInt(resp[4], 10)
+        q._received= parseInt(resp[5], 10)
+        q._sent= parseInt(resp[6], 10)
+
+        # Call Callback
+        cb null, q
+      else
+        error = new Error("Queue ["+name+"] does not exist")
+        cb error
+
+  # Create a New Queue with the Given Options
+  @__create: (system, name, options, cb) ->
+    # REDIS: Get Current Server TIME
+    system._redis.time (err, rtime) ->
+      if err? # HANDLE ERROR
+        return cb err, null
+
+      # Commands to Set Queue Properties
+      hmset = [
+        "HMSET", system._systemKey(["queue", name, "P"]),
+        "htimeout", options.htimeout
+        "etimeout", options.etimeout
+        "plimit", options.plimit
+        "created", rtime[0]
+        "modified", rtime[0]
+        "received", 0
+        "sent", 0
+      ]
+
+      commands= [
+        hmset
+        [ "SADD", system._systemKey("queues"), name ]
+      ]
+
+      # REDIS: Create Queue
+      system._redis.multi(commands).exec (err, rset) ->
+        if err? # HANDLE ERROR
+          return cb err
+
+        # Create Queue Instance
+        q = Queue.getInstance system, name
+
+        # Save Properties
+        q._htimeout = options.htimeout
+        q._etimeout = options.etimeout
+        q._plimit   = options.plimit
+        q._created  = rtime[0]
+        q._modified = rtime[0]
+        q._received = 0
+        q._sent     = 0
+
+        cb null, q
+
+  @__addMessage: (system, queue, id, cb) ->
+    redis = system._redis
+
+    # Get Current Redis Server TIME
+    redis.time (error, rtime) ->
+      if error? # HANDLE ERROR
+        return cb error
+
+      # Modification Time : (UNIX TIMESTAMP)+SERVER MICROSENDOS
+      modified = parseInt(rtime[0], 10)*1000000+parseInt(rtime[1], 10)
+
+      # HMSET Field<-->Value Pairs
+      hmset = [
+        "HMSET", system._systemKey(["messages", id])
+        "queue", queue
+        "hidden", 0 # Messages Added are By Default Unhidden
+        "modified", modified
+      ]
+
+
+      commands = [
+        hmset
+        [ "ZADD", system._systemKey(["queue", queue, "M"]), modified, id ]
+        [ "HINCRBY", _this.system._systemKey(["queue", queue, "P"]), "received", 1 ]
+      ]
+
+      system.server.multi(commands).exec (err, rcmds) ->
+        if error? # HANDLE ERROR
+          return cb error
+
+        cb? null, id
+
+  @__removeMessage: (system, queue, id, cb) ->
+    redis = system._redis
+
+    # Get Current Redis Server TIME
+    redis.time (error, rtime) ->
+      if error? # HANDLE ERROR
+        return cb error
+
+      # Modification Time : (UNIX TIMESTAMP)+SERVER MICROSENDOS
+      modified = parseInt(rtime[0], 10)*1000000+parseInt(rtime[1], 10)
+
+      # HMSET Field<-->Value Pairs
+      hmset = [
+        "HMSET", system._systemKey(["messages", id])
+        "queue", null
+        "modified", modified
+      ]
+
+      commands = [
+        hmset
+        [ "ZREM",  system._systemKey(["queue", queue, "M"]), id ]
+        [ "ZREM",  system._systemKey(["queue", queue, "H"]), id ]
+      ]
+
+      system.server.multi(commands).exec (err, rcmds) ->
+        if error? # HANDLE ERROR
+          return cb error
+
+        cb? null, id
+
+  @__hideMessage: (system, queue, id, timeout, cb) ->
+    redis = system._redis
+
+    # REDIS: Get Current Redis Server TIME
+    redis.time (error, rtime) ->
+      if error? # HANDLE ERROR
+        return cb error
+
+
+      # Calculate Timeout : (UNIX TIMESTAMP+TIMEOUT)+SERVER MICROSENDOS
+      timeout = parseInt(rtime[0] + timeout,10)*1000000+parseInt(rtime[1], 10)
+
+      commands = [
+        [ "ZREM",  system._systemKey(["queue", queue, "M"]), id ]
+        [ "ZADD",  system._systemKey(["queue", queue, "H"]), timeout, id ]
+        [ "HSET",  system._systemKey(["messages", queue]),   "hidden", 1 ]
+      ]
+
+      redis.multi(commands).exec (error, rcmds) ->
+        if error? # HANDLE ERROR
+          return cb error
+
+        cb null, true
+
+  @__findMessage: (system, queue, id, active, cb) ->
+    Message.__load system, id, (error, m) ->
+      if error? # HANDLE ERROR
+        return cb error
+
+      # Do we have a Message in the Correct Queue?
+      if m? and (m._queue == queue) # YES
+        # Found a Valid Message
+        return cb null, msg
+      # ELSE: No Valid Message Found
+      cb null, null
+
+  @__pending: (system, queue, cb) ->
+    redis = system._redis
+
+    # Get Current Redis Server TIME
+    redis.time (error, rtime) ->
+      if error? # HANDLE ERROR
+        return cb error
+
+      # Server Time : (UNIX TIMESTAMP)+SERVER MICROSENDOS
+      time = parseInt(rtime[0], 10)*1000000+parseInt(rtime[1], 10)
+
+      # Get List of Pending Messages
+      key = system._systemKey ["queue", queue, "M"]
+      redis.zrangebyscore key, "-inf", time, (error, messages) ->
+        if error? # HANDLE ERROR
+          return cb error
+
+        cb null, messages
+
   # Create a Queue Instance (Allows for Method Chaining)
-  @getInstance = (system,name) ->
+  @getInstance = (system, name) ->
     new Queue system, name
 
   # Constructor
@@ -397,15 +618,97 @@ class Queue extends EventEmitter
   #############################
 
   # Post Message to Queue
-  post: (cb, message) ->
-    msg = Message.getInstance @system
+  post: (message, cb) ->
+    # Validate 'cb'
+    cb = if _.isFunction(cb) then cb else null
 
-    msg
-      .on "new", (msg) =>
-        @emit "new-message", msg
-      .on "error", (err) =>
-        @emit "error", err
-      .post cb, @name, message
+    @_post message, (error, m) =>
+      # HANDLE ERROR
+      if error?
+        @emit "error", error
+        return cb? error
+
+      @emit "message-new", m
+      cb? null, m
+
+    return @
+
+  postJSON: (json, cb) ->
+    # Validate 'json' Parameter
+    if _.isPlainObject json
+      return @post JSON.stringify(json), cb
+
+    throw new Error("Parameter [json] is Missing or is not an Object")
+
+  _post: (message, cb) ->
+    # Validate 'message' Parameter
+    message = nullOnEmpty message
+    if !message?
+      throw new Error("Parameter [message] is NOT a String or is an Empty String")
+
+    # Create and Post the Message to the Queue
+    Message.__create @system, @name, message, null, cb
+
+    return @
+
+  # Find a Message in Current Queue
+  #
+  # @param [Function] (OPTIONAL) cb Callback Function, if passed will be called
+  # @param [String] (REQUIRED) Message ID
+  # @param [Boolean] (OPTIONAL: Default TRUE) Search for Active Messages Only?
+  # @return [Object] self
+  # @event error Any error generated during search
+  # @event message-found Called if Message Found (message) or Not Found (null)
+  find: (id, cb) ->
+    # Validate Message ID
+    id = validateMID id
+
+    # Validate 'cb'
+    cb = if _.isFunction(cb) then cb else null
+
+    Message
+      .__findInQueue @system, @name, id, false, (error, m) =>
+        if error? # HANDLE ERROR
+          @emit "error", error
+          return cb? error
+
+        @emit "message-found", m
+        cb? null, m
+
+    return @
+
+  exists: (id, cb) ->
+    # Validate Message ID
+    id = validateMID id
+
+    # Validate 'cb'
+    cb = if _.isFunction(cb) then cb else null
+
+    Message
+      .__findInQueue @system, @name, id, false, (error, m) =>
+        if error? # HANDLE ERROR
+          @emit "error", error
+          return cb? error
+
+        exists =  if m? then true else false
+        @emit "message-exists", exists
+        cb? null, exists
+
+    return @
+
+  pending: (cb) ->
+    # Validate 'cb'
+    cb = if _.isFunction(cb) then cb else null
+
+    Queue
+      .__pending @system, @name, (error, ids) =>
+        if err? # HANDLE ERROR
+          @emit "error", error
+          return cb? error
+
+        list = if ids? then ids else []
+        @emit "messages-pending", list
+        cb? null, list
 
     return @
 
@@ -423,67 +726,61 @@ class Queue extends EventEmitter
     #  if err? # HANDLE ERROR
     #    return cb err, @
 
-    # Get Current Redis Server TIME
-    redis = @system.server
-    redis.time (err, rtime) =>
-      if err? # HANDLE ERROR
-        @emit "error", err
-        return cb? err, @
+    # Validate 'cb'
+    cb = if _.isFunction(cb) then cb else null
 
-      key = @system._systemKey ["queue", @name, "M"]
-      redis.zrangebyscore key, "-inf", rtime[0], (err, messages) =>
-        if err? # HANDLE ERROR
-          @emit "error", err
-          return cb? err, @
+    # Find Pending IDs
+    Queue
+      .__pending @system, @name, (error, ids) =>
+        if error? # HANDLE ERROR
+          @emit "error", error
+          return cb? error
 
-        if messages.length
-          msg = Message
-                  .getInstance @system
-                  .__load messages[0], (err, msg) =>
-                    @emit "peek-message", msg
-                    cb? null, msg
+        # Do we have a Pending Message
+        if ids.length # YES: Load It
+          Message.__load @system, ids[0], (error, m) =>
+            if error? # HANDLE ERROR
+              @emit "error", error
+              return cb? error
 
-    # Return SELF
+            @emit "message-peek", m
+            cb? null, m
+        else # NO
+          @emit "message-peek", null
+          cb? null, null
+
     return @
 
   # Receive Message from Queue (if any)
   receive: (cb) ->
-    # Get Current Redis Server TIME
-    redis = @system.server
-    redis.time (err, rtime) =>
-      if err? # HANDLE ERROR
-        @emit "error", err
-        return cb? err, @
+    # Validate 'cb'
+    cb = if _.isFunction(cb) then cb else null
 
-      key = @system._systemKey ["queue", @name, "M"]
-      redis.zrangebyscore key, "-inf", rtime[0], (err, messages) =>
-        if err? # HANDLE ERROR
-          @emit "error", err
-          return cb? err, @
+    Queue
+      .__pending @system, @name, (error, ids) =>
+        if error? # HANDLE ERROR
+          @emit "error", error
+          return cb? error
 
-        # Do we have any messages pending?
-        if messages.length # YES: Get 1st Message in Queue (FIFO Order)
-          msg = Message.getInstance @system
-          msg
-            .__load messages[0], (err, msg) =>
-              if err? # HANDLE ERROR
-                @emit "error", err
-                return cb? err, @
+        # Do we have a Pending Message
+        if ids.length # YES: Load It
+          Message.__load @system, ids[0], (error, m) =>
+            if error? # HANDLE ERROR
+              @emit "error", error
+              return cb? error
 
-              # Does the Message have a Hide Timeout
-              timeout = if msg?._htimeout? then msg._htimeout else _DEFAULTS.queue.htimeout
-              if timeout > 0 # YES: Temporarily hide the Message
-                msg.__hide timeout, (err, msg) =>
-                  if err? # HANDLE ERROR
-                    @emit "error", err
-                    return cb? err, @
+            # Does the Message have a Hide Timeout
+            timeout = if m._props.htimeout? then m._props.htimeout else _DEFAULTS.queue.htimeout
+            Queue.__hideMessage @system, @name, m.id(), timeout, (error, ok) =>
+              if error? # HANDLE ERROR
+                @emit "error", error
+                return cb? error
 
-                  @emit "message", msg
-                  cb? null, msg
-              else # NO: Leave Message Visible in the Queue
-                @emit "message", msg
-                cb? null, msg
-        else # NO: No Messages
+              m._props.hidden = true
+              @emit "message", m
+              cb? null, m
+
+        else # NO
           @emit "message", null
           cb? null, null
 
@@ -492,266 +789,36 @@ class Queue extends EventEmitter
 
   # Pop Message from Queue (Read and Delete)
   pop: (cb) ->
-    # Get Current Redis Server TIME
-    redis = @system.server
-    redis.time (err, rtime) =>
-      if err? # HANDLE ERROR
-        @emit "error", err
-        return cb? err, @
+    # Validate 'cb'
+    cb = if _.isFunction(cb) then cb else null
 
-      key = @system._systemKey ["queue", @name, "M"]
-      redis.zrangebyscore key, "-inf", rtime[0], (err, messages) =>
-        if err? # HANDLE ERROR
-          @emit "error", err
-          return cb? err, @
+    Queue
+      .__pending @system, @name, (error, ids) =>
+        if error? # HANDLE ERROR
+          @emit "error", error
+          return cb? error
 
-        # Do we have messages awating processing?
-        if messages.length # YES
-          msg = Message.getInstance @system
-          msg
-            .__load messages[0], (err, msg) =>
-              if err? # HANDLE ERROR
-                @emit "error", err
-                return cb? err, null
+        # Do we have a Pending Message
+        if ids.length # YES: Load It
+          Message.__load @system, ids[0], (error, m) =>
+            if error? # HANDLE ERROR
+              @emit "error", error
+              return cb? error
 
-              commands = [
-                [ "ZREM",  _this.system._systemKey(["queue", @name, "M"]), msg._id ]
-                [ "DEL", _this.system._systemKey(["messages", msg._id]) ]
-                [ "HINCRBY", _this.system._systemKey(["queue", @name, "P"]), "sent", 1 ]
-              ]
+            m.delete (error, m) =>
+              if error? # HANDLE ERROR
+                @emit "error", error
+                return cb? error
 
-              @system.server.multi(commands).exec (err, rcmds) =>
-                if err? # HANDLE ERROR
-                  @emit "error", err
-                  return cb? err, null
+              @emit "message-pop", m
+              cb? null, m
 
-                @emit "message", msg
-                @emit "removed-message", msg
-                cb? null, msg
-        else # NO: No Messages Waiting
+        else # NO
+          @emit "message-removed", null
           cb? null, null
 
     # Return SELF
     return @
-
-  # Find the Message with the Given ID in the Current Queue
-  inQueue: (cb, id, active = true) ->
-    try
-      # Validate Message ID
-      id = validateMID id
-
-      # Search Only Active Messages?
-      if active # YES
-        # Get Key Name
-        key = @system._systemKey ["queue", @name, "M"]
-
-        # Get Queue Properties
-        @system.server.sismember key, id, (err, resp) =>
-          if err? # HANDLE ERROR
-            @emit "error", err
-            return cb? err, @
-
-          exists = !!resp
-          @emit "exists", exists
-          cb? null, exists
-
-      else # NO: Search Active and Hidden
-        commands = [
-          [ "SISMEMBER", @system._systemKey ["queue", @name, "M"], id ]
-          [ "SISMEMBER", @system._systemKey ["queue", @name, "H"], id ]
-        ]
-
-        @system.multi(commands).exec (err, results) =>
-          if err? # HANDLE ERROR
-            @emit "error", err
-            return cb? err, @
-
-          exists = !!(results[0] or results[1])
-          @emit "exists", exists
-          cb? null, exists
-
-    catch err
-      @emit "error", err
-      cb? err, @
-
-    return @
-
-
-  # Find a Message in Current Queue
-  #
-  # @param [Function] (OPTIONAL) cb Callback Function, if passed will be called
-  # @param [String] (REQUIRED) Message ID
-  # @param [Boolean] (OPTIONAL: Default TRUE) Search for Active Messages Only?
-  # @return [Object] self
-  # @event error Any error generated during search
-  # @event message-found Called if Message Found (message) or Not Found (null)
-  find: (cb, id, active = true) ->
-    msg = Message.getInstance @system
-
-    msg
-      .getInstance @system
-      .on "found", (err) =>
-        @emit "error", err
-      .on "found", (msg) =>
-        @emit "found-message", mss
-      .find cb, id, @name, active
-
-    return @
-
-  # Does Queue Exist
-  exists: (cb, name) ->
-    try
-      # Validate Queue Name
-      name = validateQNAME name
-
-      # Get Key Name
-      key = @system._systemKey ["queue", name, "P"]
-
-      @system.server.exists key, (err, resp) =>
-        if err? # HANDLE ERROR
-          @emit "error", err
-          return cb? err, @
-
-        exists = !!resp
-        @emit "exists", exists
-        cb? null, exists
-
-    catch err
-      @emit "error", err
-      cb? err, @
-
-    return @
-
-  # Load Queues Properties from Redis
-  load: (cb, name) ->
-    try
-      # Validate Queue Name
-      name = validateQNAME name
-
-      # Get Key Name
-      key = @system._systemKey ["queue", name, "P"]
-      @system.server.exists key, (err, resp) =>
-        # Does the Queue Exist?
-        if resp # YES
-          @._load cb, name
-        else
-          # Call Callback
-          @emit "not-found"
-          cb? null, null
-
-    catch err
-      @emit "error", err
-      cb? err, @
-
-    return @
-
-  _load: (cb, name) ->
-    # Get Key Name
-    key = @system._systemKey ["queue", name, "P"]
-
-    # Get Queue Properties
-    @system.server.hmget key, Queue._redisProps, (err, resp) =>
-      if err? # HANDLE ERROR
-        @emit "error", err
-        return cb? err, @
-
-      if resp.length
-        # Extract Queue Properties
-        @name = name
-        @_htimeout= parseInt(resp[0], 10)
-        @_etimeout= parseInt(resp[1], 10) or 0
-        @_plimit= parseInt(resp[2], 10) or 0
-        @_created= parseInt(resp[3], 10)
-        @_modified= parseInt(resp[4], 10)
-        @_received= parseInt(resp[5], 10)
-        @_sent= parseInt(resp[6], 10)
-
-        # Call Callback
-        @emit "loaded", @
-        cb? null, @
-      else
-        @emit "not-found", name
-        cb? null, @
-
-    return @
-
-  # Create a New Queue with the Given Options
-  create: (cb, name, options) ->
-    try
-      # Validate Queue Name
-      name = validateQNAME name
-
-      # Get Key Name
-      key = @system._systemKey ["queue", name, "P"]
-      @system.server.exists key, (err, resp) =>
-        # Does the Queue Exist?
-        if resp # YES: Error
-          # Call Callback
-          @emit "found"
-          cb? null, null
-        else # NO: Create It
-          @._create cb, name, options
-
-    catch err
-      @emit "error", err
-      cb? err, @
-
-    return @
-
-  # Create a New Queue with the Given Options
-  _create: (cb, name, options) ->
-    # Initialize Queue Options
-    if !options?
-      options = _DEFAULTS.queue
-    else
-      options = _.extend (
-        _DEFAULTS.queue
-        _.pick options, (value,key) ->
-          ["htimeout", "etimeout", "plimit"].indexOf(key) > 0
-        )
-
-    # Get Current Redis Server TIME
-    redis = @system.server
-    redis.time (err, rtime) =>
-      if err? # HANDLE ERROR
-        @emit "error", err
-        return cb? err, @
-
-      # Commands to Set Queue Properties
-      hmset = [
-        "HMSET", @system._systemKey(["queue", name, "P"]),
-        "htimeout", options.htimeout
-        "etimeout", options.etimeout
-        "plimit", options.plimit
-        "created", rtime[0]
-        "modified", rtime[0]
-        "received", 0
-        "sent", 0
-      ]
-
-      commands= [
-        hmset
-        [ "SADD", @system._systemKey("queues"), name ]
-      ]
-
-      redis.multi(commands).exec (err, rset) =>
-        if err? # HANDLE ERROR
-          @emit "error", err
-          return cb? err, @
-
-        # Save Properties
-        @name      = name
-        @_htimeout = options.htimeout
-        @_etimeout = options.etimeout
-        @_plimit   = options.plimit
-        @_created  = rtime[0]
-        @_modified = rtime[0]
-        @_received = 0
-        @_sent     = 0
-
-        # Call Callback
-        @emit "created", @
-        cb? null, @
 
 class System extends EventEmitter
   # System Cache
@@ -768,25 +835,25 @@ class System extends EventEmitter
 
     # Did we receive a Redis Connection?
     if options.constructor?.name is "RedisClient" # YES
-      @server = options
+      @_redis = options
     else # NO: Create New Connection
       opts = _.extend _DEFAULTS.redis, options
-      @server = redis.createClient(opts.port, opts.host, opts.options)
+      @_redis = redis.createClient(opts.port, opts.host, opts.options)
 
     # If external client is used it might already be connected. So we check here:
-    @connected = @server.connected or false
+    @connected = @_redis.connected or false
     if @connected
       @emit "connect", @
       @initializeRedis
 
     # REDIS EVENTS: Connect
-    @server.on "connect", =>
+    @_redis.on "connect", =>
       @connected = true
       @emit "connect", @
       @initializeRedis
 
     # REDIS EVENTS: Error
-    @server.on "error", (err) =>
+    @_redis.on "error", (err) =>
       if err.message.indexOf "ECONNREFUSED"
         @connected = false
         @emit "disconnect"
@@ -795,7 +862,7 @@ class System extends EventEmitter
         @emit "error", err
 
   quit: (cb) ->
-    @server.quit (err, resp) =>
+    @_redis.quit (err, resp) =>
       if err? # HANDLE ERROR
         @emit "error", err
         return cb? err, @
@@ -805,101 +872,146 @@ class System extends EventEmitter
 
     return @
 
-  # List Queues in System
-  queues: (cb) ->
-    # REDIS : List Members of Set
-    @server.smembers @_systemKey("queues"), (err, resp) =>
-      if err? # HANDLE ERROR
-        @emit "error", error
-        return cb? err, @
+  post: (message, queue, ifexists = false, cb) ->
+    # Validate 'message' Parameter
+    message = nullOnEmpty message
+    # Validate Queue Name
+    queue = validateQNAME queue
 
-      @emit "queues", resp
-      cb? null, resp
+    if !message?
+      throw new Error("Parameter [message] is NOT a String or is an Empty String")
+
+    # Handle Optional Parameters
+    if _.isFunction ifexists
+      cb = ifexists
+      ifexists = false
+    else
+      ifexists = !!ifexists
+
+    # Validate 'cb'
+    cb = if _.isFunction(cb) then cb else null
+
+    wrapper = (error, q) =>
+      # HANDLE ERROR
+      if err?
+        @emit "error", error
+        return cb? error, @
+
+      # Use Queue Object to Post Message
+      q._post message, (error, m) =>
+        # HANDLE ERROR
+        if error?
+          @emit "error", error
+          return cb? error, @
+
+        @emit "message-new", m, queue
+        cb? null, m
+
+    # Do Only Want to Post ONLY IF the Queue Exists?
+    if ifexists # YES
+      Queue
+        .__load @, queue, wrapper
+    else # NO: Create Queue
+      Queue
+        .__loadOrCreate @, queue, _DEFAULTS.queue, wrapper
 
     return @
 
-  queue: (name, options, cb) ->
+  postJSON: (json, queue, ifexists = false, cb) ->
+    # Validate 'json' Parameter
+    if _.isPlainObject json
+      return @post JSON.stringify(json), queue, ifexists, cb
+
+    throw new Error("Parameter [json] is Missing or is not an Object")
+
+  # List Queues in System
+  queues: (cb) ->
+    # Validate 'cb'
+    cb = if _.isFunction(cb) then cb else null
+
+    Queue
+      .__list @, (error, list) =>
+        if error? # HANDLE ERROR
+          @emit "error", error
+          return cb? error
+
+        @emit "queues", list
+        cb? null, list
+
+    return @
+
+  queue: (name, ifexists, options, cb) ->
+    # Was ifexists Set?
+    if _.isFunction ifexists # NO: it is Actually the Callback
+      cb = ifexists
+      ifexists = false
+      options = null
+    else
+      ifexists = !!ifexists
+
     # Was Options Set?
-    if _.isFunction options # NO: it Actually the Callback
+    if _.isFunction options # NO: it is Actually the Callback
       cb = options
       options = null
 
-    try
-      # Validate Queue Name
-      name = validateQNAME name
+    # Is Options Valid or NULL?
+    if options? && !_.isPlainObject options # NO: Error
+      throw new Error("Parameter [options] contains an Invalid Value")
 
-      # Is the Queue Already in Cache?
-      if @_cache.hasOwnProperty name # YES: Use That Object
-        q = @_cache[name]
-        @emit "queue", q
-        cb? null, q
-        return @
+    # Validate 'cb'
+    cb = if _.isFunction(cb) then cb else null
 
-      q = Queue.getInstance @
-      q
-        .on "created", (q) =>
-          # Cache Entry
-          @_cache[name] = q
-          # TODO: If Queue is Deleted Remove from Cache
+    return @_queue name, false, options, cb
 
-          @emit "queue", q
-          cb? null, q
-        .on "loaded", (q) =>
-          # Cache Entry
-          @_cache[name] = q
-          # TODO: If Queue is Deleted Remove from Cache
+  _queue:  (name, ifexists, options, cb) ->
+    # Validate Queue Name
+    name = validateQNAME name
 
-          @emit "queue", q
-          cb? null, q
-        .on "not-found", (name) =>
-          err = new  Error("Queue ["+name+"] not found")
-          @emit "error", err
-          cb? err, null
-        .on "error", (err) =>
-          @emit "error", err
-          cb? err, null
-        .on "exists", (exists) ->
-          # NOTE: We use null as the callback, in order to avoid calling cb twice
-          # when we process the events
-          if exists
-            q._load null, name
-          else
-            q._create null, name, options
-        .exists null, name
+    wrapper = (error, q) =>
+      if error? # HANDLE ERROR
+        @emit "error", error
+        return cb? error
 
-    catch err
-      @emit "error", err
-      cb? err, @
+      @emit "queue", q
+      cb? null, q
+
+    if ifexists
+      Queue
+        .__load @, name, wrapper
+    else
+      # Make Sure we Have Someting Valid for Queue Options
+      if options?
+        options = _.extend (
+          _DEFAULTS.queue
+          _.pick options, (value,key) ->
+            ["htimeout", "etimeout", "plimit"].indexOf(key) > 0
+          )
+      else
+        options = _DEFAULTS.queue
+
+      Queue
+        .__loadOrCreate @, name, options, wrapper
 
     return @
 
-  queueExists: (name, cb) ->
+  existsQueue: (name, cb) ->
+    # Validate Queue Name
+    name = validateQNAME name
+
+    # Validate 'cb'
+    cb = if _.isFunction(cb) then cb else null
+
     Queue
-      .getInstance @
-      .exists cb, name
-      .on "exists", (exists) =>
-        @emit "queue-exists", name, exists
-      .on "error", (err) =>
-        @emit "error", err
+      .__exists @, name, (error, exists) =>
+        # HANDLE ERROR
+        if error?
+          @emit "error", error
+          return cb? error
+
+        @emit "queue-exists", exists, name
+        cb? null, exists, name
 
     return @
-
-  message: (name, cb) ->
-    q = Queue.getInstance @
-    q
-      .on "message", (msg) =>
-        @emit "message", msg
-        cb? null, msg
-      .on "loaded", (queue) ->
-        q.receive
-      .on "not-found", (name) =>
-        err = new  Error("Queue ["+name+"] not found")
-        @emit "error", err
-        cb? err, null
-      .on "error", (err) =>
-        @emit "error", err
-        cb? err, null
-      ._load null, name
 
   # Find a Message Globally (in any Queue)
   #
@@ -910,21 +1022,41 @@ class System extends EventEmitter
   # @return [Object] self
   # @event error Any error generated during search
   # @event message-found Called if Message Found (message) or Not Found (null)
-  findMessage: (id, name, active, cb) ->
-    # Was Active Flag Set?
-    if _.isFunction active # NO: it Actually the Callback
-      cb = active
-      active = true
-    else  # Convert Active to Boolean
-      active = !!active
+  find: (id, name = null, active = false, cb) ->
+    # Is 'name' the callback?
+    if _.isFunction name # YES: Switch Around Parameters
+      cb = name
+      active = false
+      name = null
+    # NO: Is 'active' the callback?
+    else if _.isFunction active # YES: Switch Around Parameters
+      cb = name
+      active = false
 
-    Message
-      .getInstance @
-      .find cb, id, name, active
-      .on "found", (message) =>
-        @emit "message-found", message
-      .on "error", (err) =>
-        @emit "error", err
+    # Validate Message ID
+    id = validateMID id
+
+     # Valdiate Queue Name
+    name = nullOnEmpty name
+    if name?
+      name = validateQNAME name
+
+    # Validate 'cb'
+    cb = if _.isFunction(cb) then cb else null
+
+    # Event/Callback Wrapper
+    wrapper = (error, m) =>
+      if error? # HANDLE ERROR
+        @emit "error", error
+        return cb? error
+
+      @emit "found", m
+      cb? null, m
+
+    if name?
+      Message.__findInQueue @system, @name, id, false, wrapper
+    else
+      Message.__findInAll @system, id, false, wrapper
 
     return @
 

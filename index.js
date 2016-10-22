@@ -23,7 +23,6 @@ OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 var EventEmitter, FlakeID, Message, Queue, System, _, _DEFAULTS, _VALIDATORS, genID, intFormat, nullOnEmpty, redis, validateMID, validateQNAME,
-  bind = function(fn, me){ return function(){ return fn.apply(me, arguments); }; },
   extend = function(child, parent) { for (var key in parent) { if (hasProp.call(parent, key)) child[key] = parent[key]; } function ctor() { this.constructor = child; } ctor.prototype = parent.prototype; child.prototype = new ctor(); child.__super__ = parent.prototype; return child; },
   hasProp = {}.hasOwnProperty;
 
@@ -99,265 +98,275 @@ Message = (function(superClass) {
 
   Message._redisProps = ["queue", "message", "hidden", "pcount", "htimeout", "etimeout", "plimit", "created", "modified"];
 
+  Message.__load = function(system, id, cb) {
+    var key;
+    key = system._systemKey(["messages", id]);
+    return system._redis.hmget(key, Message._redisProps, function(error, resp) {
+      var m;
+      if (error != null) {
+        return cb(error);
+      }
+      if (resp.length) {
+        m = Message.getInstance(system);
+        m._id = id;
+        m._props["queue"] = resp[0];
+        m._props["message"] = resp[1];
+        m._props["hidden"] = !!resp[2];
+        m._props["pcount"] = resp[3] != null ? parseInt(resp[3], 10) : null;
+        m._props["htimeout"] = resp[4] != null ? parseInt(resp[4], 10) : null;
+        m._props["etimeout"] = resp[5] != null ? parseInt(resp[5], 10) : null;
+        m._props["plimit"] = resp[6] != null ? parseInt(resp[6], 10) : null;
+        m._props["created"] = parseInt(resp[7], 10);
+        m._props["modified"] = parseInt(resp[8], 10);
+        return cb(null, m);
+      }
+      return cb(null, null);
+    });
+  };
+
+  Message.__create = function(system, queue, message, props, cb) {
+    if (props == null) {
+      props = {};
+    }
+    redis = system._redis;
+    return redis.time(function(err, rtime) {
+      var commands, created, hmset, id;
+      if (typeof error !== "undefined" && error !== null) {
+        return cb(error, null);
+      }
+      id = genID();
+      hmset = ["HMSET", system._systemKey(["messages", id])];
+      props = {
+        hidden: false
+      };
+      hmset.push("hidden", false);
+      _.forOwn(props, function(value, key) {
+        if (_.indexOf(Message._redisProps, key) >= 0) {
+          return hmset.push(key, props[key] = value);
+        }
+      });
+      created = parseInt(rtime[0], 10) * 1000000 + parseInt(rtime[1], 10);
+      hmset.push("queue", props["queue"] = queue);
+      hmset.push("message", props["message"] = message);
+      hmset.push("created", props["created"] = created);
+      hmset.push("modified", props["modified"] = created);
+      commands = [hmset, ["ZADD", system._systemKey(["queue", queue, "M"]), created, id], ["HINCRBY", system._systemKey(["queue", queue, "P"]), "received", 1]];
+      return redis.multi(commands).exec(function(error, rcmds) {
+        var m;
+        if (error != null) {
+          return cb(error, null);
+        }
+        m = Message.getInstance(system);
+        m._id = id;
+        m._props = props;
+        return cb(null, m);
+      });
+    });
+  };
+
+  Message.__delete = function(system, queue, id, cb) {
+    var commands;
+    redis = system._redis;
+    commands = [["ZREM", system._systemKey(["queue", queue, "M"]), id], ["ZREM", system._systemKey(["queue", queue, "H"]), id], ["DEL", system._systemKey(["messages", id])]];
+    return redis.multi(commands).exec(function(error, rcmds) {
+      if (error != null) {
+        return cb(error);
+      }
+      return cb(null, id);
+    });
+  };
+
+  Message.__findInAll = function(system, id, active, cb) {
+    return Message.__load(system, id, function(error, m) {
+      if (error != null) {
+        return cb(error);
+      }
+      if ((m != null) && (!active || !m._props.hidden)) {
+        return cb(null, msg);
+      }
+      return cb(null, null);
+    });
+  };
+
+  Message.__updateProperty = function(system, id, pname, pvalue, cb) {
+    var key;
+    key = system._systemKey(["messages", id]);
+    return system._redis.hmset(key, pname, pvalue, function(error, resp) {
+      if (error != null) {
+        cb(error);
+      }
+      return cb(null, true);
+    });
+  };
+
+  Message.prototype._id = null;
+
+  Message.prototype._props = {};
+
   Message.getInstance = function(system) {
     return new Message(system);
   };
 
   function Message(system1) {
     this.system = system1;
-    this.__hide = bind(this.__hide, this);
   }
 
-  Message.prototype.post = function(cb, queue, message, props) {
-    var error, error1;
-    if (props == null) {
-      props = {};
+  Message.prototype.id = function() {
+    return this._id;
+  };
+
+  Message.prototype.message = function() {
+    return this._props.message;
+  };
+
+  Message.prototype.queue = function() {
+    return this._props.queue;
+  };
+
+  Message.prototype.update = function(message, cb) {
+    message = nullOnEmpty(message);
+    if (message == null) {
+      throw new Error("Parameter [message] is NOT a String or is an Empty String");
     }
-    try {
-      this._queue = validateQNAME(queue);
-      this._id = genID();
-      this._message = nullOnEmpty(message);
-      if (message == null) {
-        throw new Error("INVALID Parameter Value [message]");
-      }
-      this._hidden = false;
-      redis = this.system.server;
-      redis.time((function(_this) {
-        return function(err, rtime) {
-          var commands, hmset;
-          if (err != null) {
-            _this.emit("error", error);
-            return typeof cb === "function" ? cb(err, _this) : void 0;
-          }
-          hmset = ["HMSET", _this.system._systemKey(["messages", _this._id])];
-          _.forOwn(props, function(value, key) {
-            switch (key) {
-              case "pcount":
-                _this._pcount = value;
-                return hmset.push(key, value);
-              case "htimeout":
-                _this._htimeout = value;
-                return hmset.push(key, value);
-              case "etimeout":
-                _this._etimeout = value;
-                return hmset.push(key, value);
-              case "plimit":
-                _this._plimit = value;
-                return hmset.push(key, value);
-            }
-          });
-          _this._created = rtime[0];
-          _this._modified = rtime[0];
-          hmset.push("queue", _this._queue);
-          hmset.push("message", _this._message);
-          hmset.push("hidden", !!_this._hidden);
-          hmset.push("created", rtime[0]);
-          hmset.push("modified", rtime[0]);
-          commands = [hmset, ["ZADD", _this.system._systemKey(["queue", _this._queue, "M"]), _this._created, _this._id], ["HINCRBY", _this.system._systemKey(["queue", _this._queue, "P"]), "received", 1]];
-          return _this.system.server.multi(commands).exec(function(err, rcmds) {
-            if (err != null) {
-              _this.emit("error", error);
-              return typeof cb === "function" ? cb(err, _this) : void 0;
-            }
-            _this.emit("new", _this);
-            return typeof cb === "function" ? cb(null, _this) : void 0;
-          });
-        };
-      })(this));
-    } catch (error1) {
-      error = error1;
-      this.emit("error", error);
-      if (typeof cb === "function") {
-        cb(err, this);
-      }
-    }
+    cb = _.isFunction(cb) ? cb : null;
+    Message.__updateProperty(this.system, this._id, "message", message, (function(_this) {
+      return function(error, ok) {
+        var old;
+        if (error != null) {
+          _this.emit("error", error);
+          return typeof cb === "function" ? cb(error, _this) : void 0;
+        }
+        if (ok) {
+          old = _this._props["message"];
+          _this._props["message"] = message;
+          _this.emit("updated", _this, "message", old);
+          return typeof cb === "function" ? cb(error, _this, "message", old) : void 0;
+        } else {
+          error = new Error("Failed to Update [message] in Message [" + _this._id + "]");
+          _this.emit("error", error);
+          return typeof cb === "function" ? cb(error, _this) : void 0;
+        }
+      };
+    })(this));
     return this;
   };
 
-  Message.prototype.find = function(cb, id, qname, active) {
-    var error, error1;
-    if (active == null) {
-      active = true;
+  Message.prototype.updateJSON = function(json, cb) {
+    if (_.isPlainObject(json)) {
+      return this.update(JSON.stringify(json), cb);
     }
-    try {
-      id = validateMID(id);
-      qname = qname != null ? qname : validateQNAME(qname);
-      if (qname != null) {
-        this._findInQueue(cb, id, queue, active);
-      } else {
-        this._findInAll(cb, id, active);
-      }
-    } catch (error1) {
-      error = error1;
-      this.emit("error", error);
-      if (typeof cb === "function") {
-        cb(err, this);
-      }
-    }
-    return this;
+    throw new Error("Parameter [json] is Missing or is not an Object");
   };
 
   Message.prototype["delete"] = function(cb) {
-    var commands, err, error1;
-    try {
-      validateMID(this._id);
-      validateQNAME(this._queue);
-      commands = [["ZREM", this.system._systemKey(["queue", this._queue, "M"]), this._id], ["ZREM", this.system._systemKey(["queue", this._queue, "H"]), this._id], ["DEL", this.system._systemKey(["messages", this._id])]];
-      this.system.server.multi(commands).exec((function(_this) {
-        return function(err, rcmds) {
-          if (err != null) {
-            _this.emit("error", err);
-            return typeof cb === "function" ? cb(err, null) : void 0;
+    Message.__delete(this.system, this._props.queue, this._id, (function(_this) {
+      return function(error, id) {
+        if (error != null) {
+          _this.emit("error", error);
+          if (typeof cb === "function") {
+            cb(error);
           }
-          _this.emit("deleted", _this);
-          return typeof cb === "function" ? cb(null, _this) : void 0;
-        };
-      })(this));
-    } catch (error1) {
-      err = error1;
-      this.emit("error", err);
-      if (typeof cb === "function") {
-        cb(err, this);
-      }
-    }
+        }
+        _this.emit("deleted", _this);
+        return typeof cb === "function" ? cb(null, _this) : void 0;
+      };
+    })(this));
     return this;
   };
 
   Message.prototype.move = function(toqueue, cb) {
-    var err, error1;
-    try {
-      validateMID(this._id);
-      validateQNAME(this._queue);
-      toqueue = validateQNAME(toqueue);
-      if (this._queue !== toqueue) {
-        redis = this.system.server;
-        redis.time((function(_this) {
-          return function(err, rtime) {
-            var commands;
-            if (err != null) {
-              _this.emit("error", error);
-              return typeof cb === "function" ? cb(err, _this) : void 0;
+    toqueue = validateQNAME(toqueue);
+    if (this._props.queue !== toqueue) {
+      Queue.__exists(this.system, toqueue, (function(_this) {
+        return function(error, exists) {
+          if (error != null) {
+            _this.emit("error", error);
+            if (typeof cb === "function") {
+              cb(error);
             }
-            commands = [["ZREM", _this.system._systemKey(["queue", _this._queue, "M"]), _this._id], ["ZREM", _this.system._systemKey(["queue", _this._queue, "H"]), _this._id]];
-            return _this.system.server.multi(commands).exec(function(err, rcmds) {
-              var hmset;
-              if (err != null) {
-                _this.emit("error", err);
-                return typeof cb === "function" ? cb(err, null) : void 0;
+          }
+          if (!exists) {
+            error = new Error("Destination queue [" + toqueue + "] does not exist");
+            _this.emit("error", error);
+            if (typeof cb === "function") {
+              cb(error);
+            }
+          }
+          return Queue.__removeMessage(_this.system, _this._props.queue, _this._id, function(error, id) {
+            if (error != null) {
+              _this.emit("error", error);
+              if (typeof cb === "function") {
+                cb(error);
               }
-              _this._queue = toqueue;
-              _this._hidden = false;
-              _this._modified = rtime[0];
-              hmset = ["HMSET", _this.system._systemKey(["messages", _this._id]), "queue", _this._queue, "hidden", _this._hidden, "modified", rtime[0]];
-              commands = [hmset, ["ZADD", _this.system._systemKey(["queue", _this._queue, "M"]), _this._created, _this._id], ["HINCRBY", _this.system._systemKey(["queue", _this._queue, "P"]), "received", 1]];
-              return _this.system.server.multi(commands).exec(function(err, rcmds) {
-                if (err != null) {
-                  _this.emit("error", error);
-                  return typeof cb === "function" ? cb(err, _this) : void 0;
+            }
+            return Queue.__addMessage(_this.system, toqueue, _this._id, function(error, id) {
+              if (error != null) {
+                _this.emit("error", error);
+                if (typeof cb === "function") {
+                  cb(error);
                 }
-                _this.emit("moved", _this);
-                return typeof cb === "function" ? cb(null, _this) : void 0;
-              });
+              }
+              _this.emit("moved", _this);
+              return typeof cb === "function" ? cb(null, _this) : void 0;
             });
-          };
-        })(this));
-      } else {
-        this.emit("moved", this);
-        if (typeof cb === "function") {
-          cb(null, this);
-        }
-      }
-    } catch (error1) {
-      err = error1;
-      this.emit("error", err);
+          });
+        };
+      })(this));
+    } else {
+      this.emit("moved", this);
       if (typeof cb === "function") {
-        cb(err, this);
+        cb(null, this);
       }
     }
     return this;
   };
 
-  Message.prototype._findInAll = function(cb, id, active) {
-    this.__load(id, (function(_this) {
-      return function(err, msg) {
-        if (err != null) {
+  Message.prototype.hide = function(toqueue, cb) {
+    var timeout;
+    timeout = this._props.htimeout != null ? this._props.htimeout : _DEFAULTS.queue.htimeout;
+    Queue.__hideMessage(this.system, this._props.queue, this._id, timeout, (function(_this) {
+      return function(error, hidden) {
+        if (error != null) {
           _this.emit("error", error);
-          return typeof cb === "function" ? cb(err, msg) : void 0;
+          if (typeof cb === "function") {
+            cb(error);
+          }
         }
-        if ((msg != null) && (!active || !msg._hidden)) {
-          _this.emit("found", msg);
-          return typeof cb === "function" ? cb(null, msg) : void 0;
-        }
-        _this.emit("found");
-        return typeof cb === "function" ? cb(null, null) : void 0;
+        _this.emit("hidden", _this);
+        return typeof cb === "function" ? cb(null, _this) : void 0;
       };
     })(this));
     return this;
   };
 
-  Message.prototype._findInQueue = function(cb, id, queue) {
-    this.__load(id, (function(_this) {
-      return function(err, msg) {
-        if (err != null) {
-          _this.emit("error", error);
-          return typeof cb === "function" ? cb(err, msg) : void 0;
-        }
-        if ((msg != null) && (msg._queue === queue) && (!active || !msg._hidden)) {
-          _this.emit("found", msg);
-          return typeof cb === "function" ? cb(null, msg) : void 0;
-        }
-        _this.emit("found");
-        return typeof cb === "function" ? cb(null, null) : void 0;
-      };
-    })(this));
-    return this;
-  };
-
-  Message.prototype.__load = function(id, cb) {
+  Message.prototype.refresh = function(cb) {
     var key;
-    key = this.system._systemKey(["messages", id]);
-    this.system.server.hmget(key, Message._redisProps, (function(_this) {
-      return function(err, resp) {
-        if (err != null) {
-          return typeof cb === "function" ? cb(err, _this) : void 0;
+    key = this.system._systemKey(["messages", this._id]);
+    this.system._redis.hmget(key, Message._redisProps, (function(_this) {
+      return function(error, resp) {
+        if (error != null) {
+          _this.emit("error", error);
+          if (typeof cb === "function") {
+            cb(error);
+          }
         }
         if (resp.length) {
-          _this._id = id;
-          _this._queue = resp[0];
-          _this._message = resp[1];
-          _this._hidden = !!resp[2];
-          _this._pcount = resp[3] != null ? parseInt(resp[3], 10) : null;
-          _this._htimeout = resp[4] != null ? parseInt(resp[4], 10) : null;
-          _this._etimeout = resp[5] != null ? parseInt(resp[5], 10) : null;
-          _this._plimit = resp[6] != null ? parseInt(resp[6], 10) : null;
-          _this._created = parseInt(resp[7], 10);
-          _this._modified = parseInt(resp[8], 10);
-          return typeof cb === "function" ? cb(null, _this) : void 0;
+          _this._props["message"] = resp[1];
+          _this._props["hidden"] = !!resp[2];
+          _this._props["pcount"] = resp[3] != null ? parseInt(resp[3], 10) : null;
+          _this._props["htimeout"] = resp[4] != null ? parseInt(resp[4], 10) : null;
+          _this._props["etimeout"] = resp[5] != null ? parseInt(resp[5], 10) : null;
+          _this._props["plimit"] = resp[6] != null ? parseInt(resp[6], 10) : null;
+          _this._props["created"] = parseInt(resp[7], 10);
+          _this._props["modified"] = parseInt(resp[8], 10);
+          return cb(null, _this);
         }
-        return typeof cb === "function" ? cb(null, null) : void 0;
+        error = new Error("Invalid Message [" + _this._id + "]");
+        _this.emit("error", error);
+        return typeof cb === "function" ? cb(error) : void 0;
       };
     })(this));
     return this;
-  };
-
-  Message.prototype.__hide = function(timeout, cb) {
-    return this.system.server.time((function(_this) {
-      return function(err, rtime) {
-        var commands;
-        if (err != null) {
-          return typeof cb === "function" ? cb(err, null) : void 0;
-        }
-        timeout = rtime[0] + timeout;
-        commands = [["ZREM", _this.system._systemKey(["queue", _this._queue, "M"]), _this._id], ["ZADD", _this.system._systemKey(["queue", _this._queue, "H"]), timeout, _this._id], ["HSET", _this.system._systemKey(["messages", _this._id]), "hidden", 1]];
-        return _this.system.server.multi(commands).exec(function(err, rcmds) {
-          if (err != null) {
-            return typeof cb === "function" ? cb(err, null) : void 0;
-          }
-          _this._hidden = true;
-          return typeof cb === "function" ? cb(null, _this) : void 0;
-        });
-      };
-    })(this));
   };
 
   return Message;
@@ -368,6 +377,179 @@ Queue = (function(superClass) {
   extend(Queue, superClass);
 
   Queue._redisProps = ["htimeout", "etimeout", "plimit", "created", "modified", "received", "sent"];
+
+  Queue.__list = function(system, cb) {
+    return system._redis.smembers(system._systemKey("queues"), function(error, resp) {
+      if (error != null) {
+        return cb(error);
+      }
+      return cb(null, resp);
+    });
+  };
+
+  Queue.__loadOrCreate = function(system, name, options, cb) {
+    return Queue.__exists(system, name, function(error, exists) {
+      if (error != null) {
+        return cb(error, null);
+      }
+      if (exists) {
+        return Queue.__load(system, name, cb);
+      } else {
+        return Queue.__create(system, name, options, cb);
+      }
+    });
+  };
+
+  Queue.__exists = function(system, name, cb) {
+    var key;
+    key = system._systemKey(["queue", name, "P"]);
+    system._redis.exists(key, function(err, resp) {
+      var exists;
+      if (err != null) {
+        return cb(err, null);
+      }
+      exists = !!resp;
+      return cb(null, exists);
+    });
+    return this;
+  };
+
+  Queue.__load = function(system, name, cb) {
+    var key;
+    key = system._systemKey(["queue", name, "P"]);
+    return system._redis.hmget(key, Queue._redisProps, function(error, resp) {
+      var q;
+      if (error != null) {
+        return cb(error);
+      }
+      if (resp.length) {
+        q = Queue.getInstance(system, name);
+        q._htimeout = parseInt(resp[0], 10);
+        q._etimeout = parseInt(resp[1], 10) || 0;
+        q._plimit = parseInt(resp[2], 10) || 0;
+        q._created = parseInt(resp[3], 10);
+        q._modified = parseInt(resp[4], 10);
+        q._received = parseInt(resp[5], 10);
+        q._sent = parseInt(resp[6], 10);
+        return cb(null, q);
+      } else {
+        error = new Error("Queue [" + name + "] does not exist");
+        return cb(error);
+      }
+    });
+  };
+
+  Queue.__create = function(system, name, options, cb) {
+    return system._redis.time(function(err, rtime) {
+      var commands, hmset;
+      if (err != null) {
+        return cb(err, null);
+      }
+      hmset = ["HMSET", system._systemKey(["queue", name, "P"]), "htimeout", options.htimeout, "etimeout", options.etimeout, "plimit", options.plimit, "created", rtime[0], "modified", rtime[0], "received", 0, "sent", 0];
+      commands = [hmset, ["SADD", system._systemKey("queues"), name]];
+      return system._redis.multi(commands).exec(function(err, rset) {
+        var q;
+        if (err != null) {
+          return cb(err);
+        }
+        q = Queue.getInstance(system, name);
+        q._htimeout = options.htimeout;
+        q._etimeout = options.etimeout;
+        q._plimit = options.plimit;
+        q._created = rtime[0];
+        q._modified = rtime[0];
+        q._received = 0;
+        q._sent = 0;
+        return cb(null, q);
+      });
+    });
+  };
+
+  Queue.__addMessage = function(system, queue, id, cb) {
+    redis = system._redis;
+    return redis.time(function(error, rtime) {
+      var commands, hmset, modified;
+      if (error != null) {
+        return cb(error);
+      }
+      modified = parseInt(rtime[0], 10) * 1000000 + parseInt(rtime[1], 10);
+      hmset = ["HMSET", system._systemKey(["messages", id]), "queue", queue, "hidden", 0, "modified", modified];
+      commands = [hmset, ["ZADD", system._systemKey(["queue", queue, "M"]), modified, id], ["HINCRBY", _this.system._systemKey(["queue", queue, "P"]), "received", 1]];
+      return system.server.multi(commands).exec(function(err, rcmds) {
+        if (error != null) {
+          return cb(error);
+        }
+        return typeof cb === "function" ? cb(null, id) : void 0;
+      });
+    });
+  };
+
+  Queue.__removeMessage = function(system, queue, id, cb) {
+    redis = system._redis;
+    return redis.time(function(error, rtime) {
+      var commands, hmset, modified;
+      if (error != null) {
+        return cb(error);
+      }
+      modified = parseInt(rtime[0], 10) * 1000000 + parseInt(rtime[1], 10);
+      hmset = ["HMSET", system._systemKey(["messages", id]), "queue", null, "modified", modified];
+      commands = [hmset, ["ZREM", system._systemKey(["queue", queue, "M"]), id], ["ZREM", system._systemKey(["queue", queue, "H"]), id]];
+      return system.server.multi(commands).exec(function(err, rcmds) {
+        if (error != null) {
+          return cb(error);
+        }
+        return typeof cb === "function" ? cb(null, id) : void 0;
+      });
+    });
+  };
+
+  Queue.__hideMessage = function(system, queue, id, timeout, cb) {
+    redis = system._redis;
+    return redis.time(function(error, rtime) {
+      var commands;
+      if (error != null) {
+        return cb(error);
+      }
+      timeout = parseInt(rtime[0] + timeout, 10) * 1000000 + parseInt(rtime[1], 10);
+      commands = [["ZREM", system._systemKey(["queue", queue, "M"]), id], ["ZADD", system._systemKey(["queue", queue, "H"]), timeout, id], ["HSET", system._systemKey(["messages", queue]), "hidden", 1]];
+      return redis.multi(commands).exec(function(error, rcmds) {
+        if (error != null) {
+          return cb(error);
+        }
+        return cb(null, true);
+      });
+    });
+  };
+
+  Queue.__findMessage = function(system, queue, id, active, cb) {
+    return Message.__load(system, id, function(error, m) {
+      if (error != null) {
+        return cb(error);
+      }
+      if ((m != null) && (m._queue === queue)) {
+        return cb(null, msg);
+      }
+      return cb(null, null);
+    });
+  };
+
+  Queue.__pending = function(system, queue, cb) {
+    redis = system._redis;
+    return redis.time(function(error, rtime) {
+      var key, time;
+      if (error != null) {
+        return cb(error);
+      }
+      time = parseInt(rtime[0], 10) * 1000000 + parseInt(rtime[1], 10);
+      key = system._systemKey(["queue", queue, "M"]);
+      return redis.zrangebyscore(key, "-inf", time, function(error, messages) {
+        if (error != null) {
+          return cb(error);
+        }
+        return cb(null, messages);
+      });
+    });
+  };
 
   Queue.getInstance = function(system, name) {
     return new Queue(system, name);
@@ -382,348 +564,179 @@ Queue = (function(superClass) {
     return this._load(cb);
   };
 
-  Queue.prototype.post = function(cb, message) {
-    var msg;
-    msg = Message.getInstance(this.system);
-    msg.on("new", (function(_this) {
-      return function(msg) {
-        return _this.emit("new-message", msg);
+  Queue.prototype.post = function(message, cb) {
+    cb = _.isFunction(cb) ? cb : null;
+    this._post(message, (function(_this) {
+      return function(error, m) {
+        if (error != null) {
+          _this.emit("error", error);
+          return typeof cb === "function" ? cb(error) : void 0;
+        }
+        _this.emit("message-new", m);
+        return typeof cb === "function" ? cb(null, m) : void 0;
       };
-    })(this)).on("error", (function(_this) {
-      return function(err) {
-        return _this.emit("error", err);
+    })(this));
+    return this;
+  };
+
+  Queue.prototype.postJSON = function(json, cb) {
+    if (_.isPlainObject(json)) {
+      return this.post(JSON.stringify(json), cb);
+    }
+    throw new Error("Parameter [json] is Missing or is not an Object");
+  };
+
+  Queue.prototype._post = function(message, cb) {
+    message = nullOnEmpty(message);
+    if (message == null) {
+      throw new Error("Parameter [message] is NOT a String or is an Empty String");
+    }
+    Message.__create(this.system, this.name, message, null, cb);
+    return this;
+  };
+
+  Queue.prototype.find = function(id, cb) {
+    id = validateMID(id);
+    cb = _.isFunction(cb) ? cb : null;
+    Message.__findInQueue(this.system, this.name, id, false, (function(_this) {
+      return function(error, m) {
+        if (error != null) {
+          _this.emit("error", error);
+          return typeof cb === "function" ? cb(error) : void 0;
+        }
+        _this.emit("message-found", m);
+        return typeof cb === "function" ? cb(null, m) : void 0;
       };
-    })(this)).post(cb, this.name, message);
+    })(this));
+    return this;
+  };
+
+  Queue.prototype.exists = function(id, cb) {
+    id = validateMID(id);
+    cb = _.isFunction(cb) ? cb : null;
+    Message.__findInQueue(this.system, this.name, id, false, (function(_this) {
+      return function(error, m) {
+        var exists;
+        if (error != null) {
+          _this.emit("error", error);
+          return typeof cb === "function" ? cb(error) : void 0;
+        }
+        exists = m != null ? true : false;
+        _this.emit("message-exists", exists);
+        return typeof cb === "function" ? cb(null, exists) : void 0;
+      };
+    })(this));
+    return this;
+  };
+
+  Queue.prototype.pending = function(cb) {
+    cb = _.isFunction(cb) ? cb : null;
+    Queue.__pending(this.system, this.name, (function(_this) {
+      return function(error, ids) {
+        var list;
+        if (typeof err !== "undefined" && err !== null) {
+          _this.emit("error", error);
+          return typeof cb === "function" ? cb(error) : void 0;
+        }
+        list = ids != null ? ids : [];
+        _this.emit("messages-pending", list);
+        return typeof cb === "function" ? cb(null, list) : void 0;
+      };
+    })(this));
     return this;
   };
 
   Queue.prototype.peek = function(cb) {
-    redis = this.system.server;
-    redis.time((function(_this) {
-      return function(err, rtime) {
-        var key;
-        if (err != null) {
-          _this.emit("error", err);
-          return typeof cb === "function" ? cb(err, _this) : void 0;
+    cb = _.isFunction(cb) ? cb : null;
+    Queue.__pending(this.system, this.name, (function(_this) {
+      return function(error, ids) {
+        if (error != null) {
+          _this.emit("error", error);
+          return typeof cb === "function" ? cb(error) : void 0;
         }
-        key = _this.system._systemKey(["queue", _this.name, "M"]);
-        return redis.zrangebyscore(key, "-inf", rtime[0], function(err, messages) {
-          var msg;
-          if (err != null) {
-            _this.emit("error", err);
-            return typeof cb === "function" ? cb(err, _this) : void 0;
-          }
-          if (messages.length) {
-            return msg = Message.getInstance(_this.system).__load(messages[0], function(err, msg) {
-              _this.emit("peek-message", msg);
-              return typeof cb === "function" ? cb(null, msg) : void 0;
-            });
-          }
-        });
+        if (ids.length) {
+          return Message.__load(_this.system, ids[0], function(error, m) {
+            if (error != null) {
+              _this.emit("error", error);
+              return typeof cb === "function" ? cb(error) : void 0;
+            }
+            _this.emit("message-peek", m);
+            return typeof cb === "function" ? cb(null, m) : void 0;
+          });
+        } else {
+          _this.emit("message-peek", null);
+          return typeof cb === "function" ? cb(null, null) : void 0;
+        }
       };
     })(this));
     return this;
   };
 
   Queue.prototype.receive = function(cb) {
-    redis = this.system.server;
-    redis.time((function(_this) {
-      return function(err, rtime) {
-        var key;
-        if (err != null) {
-          _this.emit("error", err);
-          return typeof cb === "function" ? cb(err, _this) : void 0;
+    cb = _.isFunction(cb) ? cb : null;
+    Queue.__pending(this.system, this.name, (function(_this) {
+      return function(error, ids) {
+        if (error != null) {
+          _this.emit("error", error);
+          return typeof cb === "function" ? cb(error) : void 0;
         }
-        key = _this.system._systemKey(["queue", _this.name, "M"]);
-        return redis.zrangebyscore(key, "-inf", rtime[0], function(err, messages) {
-          var msg;
-          if (err != null) {
-            _this.emit("error", err);
-            return typeof cb === "function" ? cb(err, _this) : void 0;
-          }
-          if (messages.length) {
-            msg = Message.getInstance(_this.system);
-            return msg.__load(messages[0], function(err, msg) {
-              var timeout;
-              if (err != null) {
-                _this.emit("error", err);
-                return typeof cb === "function" ? cb(err, _this) : void 0;
+        if (ids.length) {
+          return Message.__load(_this.system, ids[0], function(error, m) {
+            var timeout;
+            if (error != null) {
+              _this.emit("error", error);
+              return typeof cb === "function" ? cb(error) : void 0;
+            }
+            timeout = m._props.htimeout != null ? m._props.htimeout : _DEFAULTS.queue.htimeout;
+            return Queue.__hideMessage(_this.system, _this.name, m.id(), timeout, function(error, ok) {
+              if (error != null) {
+                _this.emit("error", error);
+                return typeof cb === "function" ? cb(error) : void 0;
               }
-              timeout = (msg != null ? msg._htimeout : void 0) != null ? msg._htimeout : _DEFAULTS.queue.htimeout;
-              if (timeout > 0) {
-                return msg.__hide(timeout, function(err, msg) {
-                  if (err != null) {
-                    _this.emit("error", err);
-                    return typeof cb === "function" ? cb(err, _this) : void 0;
-                  }
-                  _this.emit("message", msg);
-                  return typeof cb === "function" ? cb(null, msg) : void 0;
-                });
-              } else {
-                _this.emit("message", msg);
-                return typeof cb === "function" ? cb(null, msg) : void 0;
-              }
+              m._props.hidden = true;
+              _this.emit("message", m);
+              return typeof cb === "function" ? cb(null, m) : void 0;
             });
-          } else {
-            _this.emit("message", null);
-            return typeof cb === "function" ? cb(null, null) : void 0;
-          }
-        });
+          });
+        } else {
+          _this.emit("message", null);
+          return typeof cb === "function" ? cb(null, null) : void 0;
+        }
       };
     })(this));
     return this;
   };
 
   Queue.prototype.pop = function(cb) {
-    redis = this.system.server;
-    redis.time((function(_this) {
-      return function(err, rtime) {
-        var key;
-        if (err != null) {
-          _this.emit("error", err);
-          return typeof cb === "function" ? cb(err, _this) : void 0;
+    cb = _.isFunction(cb) ? cb : null;
+    Queue.__pending(this.system, this.name, (function(_this) {
+      return function(error, ids) {
+        if (error != null) {
+          _this.emit("error", error);
+          return typeof cb === "function" ? cb(error) : void 0;
         }
-        key = _this.system._systemKey(["queue", _this.name, "M"]);
-        return redis.zrangebyscore(key, "-inf", rtime[0], function(err, messages) {
-          var msg;
-          if (err != null) {
-            _this.emit("error", err);
-            return typeof cb === "function" ? cb(err, _this) : void 0;
-          }
-          if (messages.length) {
-            msg = Message.getInstance(_this.system);
-            return msg.__load(messages[0], function(err, msg) {
-              var commands;
-              if (err != null) {
-                _this.emit("error", err);
-                return typeof cb === "function" ? cb(err, null) : void 0;
+        if (ids.length) {
+          return Message.__load(_this.system, ids[0], function(error, m) {
+            if (error != null) {
+              _this.emit("error", error);
+              return typeof cb === "function" ? cb(error) : void 0;
+            }
+            return m["delete"](function(error, m) {
+              if (error != null) {
+                _this.emit("error", error);
+                return typeof cb === "function" ? cb(error) : void 0;
               }
-              commands = [["ZREM", _this.system._systemKey(["queue", _this.name, "M"]), msg._id], ["DEL", _this.system._systemKey(["messages", msg._id])], ["HINCRBY", _this.system._systemKey(["queue", _this.name, "P"]), "sent", 1]];
-              return _this.system.server.multi(commands).exec(function(err, rcmds) {
-                if (err != null) {
-                  _this.emit("error", err);
-                  return typeof cb === "function" ? cb(err, null) : void 0;
-                }
-                _this.emit("message", msg);
-                _this.emit("removed-message", msg);
-                return typeof cb === "function" ? cb(null, msg) : void 0;
-              });
+              _this.emit("message-pop", m);
+              return typeof cb === "function" ? cb(null, m) : void 0;
             });
-          } else {
-            return typeof cb === "function" ? cb(null, null) : void 0;
-          }
-        });
-      };
-    })(this));
-    return this;
-  };
-
-  Queue.prototype.inQueue = function(cb, id, active) {
-    var commands, err, error1, key;
-    if (active == null) {
-      active = true;
-    }
-    try {
-      id = validateMID(id);
-      if (active) {
-        key = this.system._systemKey(["queue", this.name, "M"]);
-        this.system.server.sismember(key, id, (function(_this) {
-          return function(err, resp) {
-            var exists;
-            if (err != null) {
-              _this.emit("error", err);
-              return typeof cb === "function" ? cb(err, _this) : void 0;
-            }
-            exists = !!resp;
-            _this.emit("exists", exists);
-            return typeof cb === "function" ? cb(null, exists) : void 0;
-          };
-        })(this));
-      } else {
-        commands = [["SISMEMBER", this.system._systemKey(["queue", this.name, "M"], id)], ["SISMEMBER", this.system._systemKey(["queue", this.name, "H"], id)]];
-        this.system.multi(commands).exec((function(_this) {
-          return function(err, results) {
-            var exists;
-            if (err != null) {
-              _this.emit("error", err);
-              return typeof cb === "function" ? cb(err, _this) : void 0;
-            }
-            exists = !!(results[0] || results[1]);
-            _this.emit("exists", exists);
-            return typeof cb === "function" ? cb(null, exists) : void 0;
-          };
-        })(this));
-      }
-    } catch (error1) {
-      err = error1;
-      this.emit("error", err);
-      if (typeof cb === "function") {
-        cb(err, this);
-      }
-    }
-    return this;
-  };
-
-  Queue.prototype.find = function(cb, id, active) {
-    var msg;
-    if (active == null) {
-      active = true;
-    }
-    msg = Message.getInstance(this.system);
-    msg.getInstance(this.system).on("found", (function(_this) {
-      return function(err) {
-        return _this.emit("error", err);
-      };
-    })(this)).on("found", (function(_this) {
-      return function(msg) {
-        return _this.emit("found-message", mss);
-      };
-    })(this)).find(cb, id, this.name, active);
-    return this;
-  };
-
-  Queue.prototype.exists = function(cb, name) {
-    var err, error1, key;
-    try {
-      name = validateQNAME(name);
-      key = this.system._systemKey(["queue", name, "P"]);
-      this.system.server.exists(key, (function(_this) {
-        return function(err, resp) {
-          var exists;
-          if (err != null) {
-            _this.emit("error", err);
-            return typeof cb === "function" ? cb(err, _this) : void 0;
-          }
-          exists = !!resp;
-          _this.emit("exists", exists);
-          return typeof cb === "function" ? cb(null, exists) : void 0;
-        };
-      })(this));
-    } catch (error1) {
-      err = error1;
-      this.emit("error", err);
-      if (typeof cb === "function") {
-        cb(err, this);
-      }
-    }
-    return this;
-  };
-
-  Queue.prototype.load = function(cb, name) {
-    var err, error1, key;
-    try {
-      name = validateQNAME(name);
-      key = this.system._systemKey(["queue", name, "P"]);
-      this.system.server.exists(key, (function(_this) {
-        return function(err, resp) {
-          if (resp) {
-            return _this._load(cb, name);
-          } else {
-            _this.emit("not-found");
-            return typeof cb === "function" ? cb(null, null) : void 0;
-          }
-        };
-      })(this));
-    } catch (error1) {
-      err = error1;
-      this.emit("error", err);
-      if (typeof cb === "function") {
-        cb(err, this);
-      }
-    }
-    return this;
-  };
-
-  Queue.prototype._load = function(cb, name) {
-    var key;
-    key = this.system._systemKey(["queue", name, "P"]);
-    this.system.server.hmget(key, Queue._redisProps, (function(_this) {
-      return function(err, resp) {
-        if (err != null) {
-          _this.emit("error", err);
-          return typeof cb === "function" ? cb(err, _this) : void 0;
-        }
-        if (resp.length) {
-          _this.name = name;
-          _this._htimeout = parseInt(resp[0], 10);
-          _this._etimeout = parseInt(resp[1], 10) || 0;
-          _this._plimit = parseInt(resp[2], 10) || 0;
-          _this._created = parseInt(resp[3], 10);
-          _this._modified = parseInt(resp[4], 10);
-          _this._received = parseInt(resp[5], 10);
-          _this._sent = parseInt(resp[6], 10);
-          _this.emit("loaded", _this);
-          return typeof cb === "function" ? cb(null, _this) : void 0;
+          });
         } else {
-          _this.emit("not-found", name);
-          return typeof cb === "function" ? cb(null, _this) : void 0;
+          _this.emit("message-removed", null);
+          return typeof cb === "function" ? cb(null, null) : void 0;
         }
       };
     })(this));
     return this;
-  };
-
-  Queue.prototype.create = function(cb, name, options) {
-    var err, error1, key;
-    try {
-      name = validateQNAME(name);
-      key = this.system._systemKey(["queue", name, "P"]);
-      this.system.server.exists(key, (function(_this) {
-        return function(err, resp) {
-          if (resp) {
-            _this.emit("found");
-            return typeof cb === "function" ? cb(null, null) : void 0;
-          } else {
-            return _this._create(cb, name, options);
-          }
-        };
-      })(this));
-    } catch (error1) {
-      err = error1;
-      this.emit("error", err);
-      if (typeof cb === "function") {
-        cb(err, this);
-      }
-    }
-    return this;
-  };
-
-  Queue.prototype._create = function(cb, name, options) {
-    if (options == null) {
-      options = _DEFAULTS.queue;
-    } else {
-      options = _.extend((_DEFAULTS.queue, _.pick(options, function(value, key) {
-        return ["htimeout", "etimeout", "plimit"].indexOf(key) > 0;
-      })));
-    }
-    redis = this.system.server;
-    return redis.time((function(_this) {
-      return function(err, rtime) {
-        var commands, hmset;
-        if (err != null) {
-          _this.emit("error", err);
-          return typeof cb === "function" ? cb(err, _this) : void 0;
-        }
-        hmset = ["HMSET", _this.system._systemKey(["queue", name, "P"]), "htimeout", options.htimeout, "etimeout", options.etimeout, "plimit", options.plimit, "created", rtime[0], "modified", rtime[0], "received", 0, "sent", 0];
-        commands = [hmset, ["SADD", _this.system._systemKey("queues"), name]];
-        return redis.multi(commands).exec(function(err, rset) {
-          if (err != null) {
-            _this.emit("error", err);
-            return typeof cb === "function" ? cb(err, _this) : void 0;
-          }
-          _this.name = name;
-          _this._htimeout = options.htimeout;
-          _this._etimeout = options.etimeout;
-          _this._plimit = options.plimit;
-          _this._created = rtime[0];
-          _this._modified = rtime[0];
-          _this._received = 0;
-          _this._sent = 0;
-          _this.emit("created", _this);
-          return typeof cb === "function" ? cb(null, _this) : void 0;
-        });
-      };
-    })(this));
   };
 
   return Queue;
@@ -749,24 +762,24 @@ System = (function(superClass) {
       this._ns = _ns + ":";
     }
     if (((ref = options.constructor) != null ? ref.name : void 0) === "RedisClient") {
-      this.server = options;
+      this._redis = options;
     } else {
       opts = _.extend(_DEFAULTS.redis, options);
-      this.server = redis.createClient(opts.port, opts.host, opts.options);
+      this._redis = redis.createClient(opts.port, opts.host, opts.options);
     }
-    this.connected = this.server.connected || false;
+    this.connected = this._redis.connected || false;
     if (this.connected) {
       this.emit("connect", this);
       this.initializeRedis;
     }
-    this.server.on("connect", (function(_this) {
+    this._redis.on("connect", (function(_this) {
       return function() {
         _this.connected = true;
         _this.emit("connect", _this);
         return _this.initializeRedis;
       };
     })(this));
-    this.server.on("error", (function(_this) {
+    this._redis.on("error", (function(_this) {
       return function(err) {
         if (err.message.indexOf("ECONNREFUSED")) {
           _this.connected = false;
@@ -780,7 +793,7 @@ System = (function(superClass) {
   }
 
   System.prototype.quit = function(cb) {
-    this.server.quit((function(_this) {
+    this._redis.quit((function(_this) {
       return function(err, resp) {
         if (err != null) {
           _this.emit("error", err);
@@ -793,132 +806,172 @@ System = (function(superClass) {
     return this;
   };
 
-  System.prototype.queues = function(cb) {
-    this.server.smembers(this._systemKey("queues"), (function(_this) {
-      return function(err, resp) {
-        if (err != null) {
+  System.prototype.post = function(message, queue, ifexists, cb) {
+    var wrapper;
+    if (ifexists == null) {
+      ifexists = false;
+    }
+    message = nullOnEmpty(message);
+    queue = validateQNAME(queue);
+    if (message == null) {
+      throw new Error("Parameter [message] is NOT a String or is an Empty String");
+    }
+    if (_.isFunction(ifexists)) {
+      cb = ifexists;
+      ifexists = false;
+    } else {
+      ifexists = !!ifexists;
+    }
+    cb = _.isFunction(cb) ? cb : null;
+    wrapper = (function(_this) {
+      return function(error, q) {
+        if (typeof err !== "undefined" && err !== null) {
           _this.emit("error", error);
-          return typeof cb === "function" ? cb(err, _this) : void 0;
+          return typeof cb === "function" ? cb(error, _this) : void 0;
         }
-        _this.emit("queues", resp);
-        return typeof cb === "function" ? cb(null, resp) : void 0;
+        return q._post(message, function(error, m) {
+          if (error != null) {
+            _this.emit("error", error);
+            return typeof cb === "function" ? cb(error, _this) : void 0;
+          }
+          _this.emit("message-new", m, queue);
+          return typeof cb === "function" ? cb(null, m) : void 0;
+        });
+      };
+    })(this);
+    if (ifexists) {
+      Queue.__load(this, queue, wrapper);
+    } else {
+      Queue.__loadOrCreate(this, queue, _DEFAULTS.queue, wrapper);
+    }
+    return this;
+  };
+
+  System.prototype.postJSON = function(json, queue, ifexists, cb) {
+    if (ifexists == null) {
+      ifexists = false;
+    }
+    if (_.isPlainObject(json)) {
+      return this.post(JSON.stringify(json), queue, ifexists, cb);
+    }
+    throw new Error("Parameter [json] is Missing or is not an Object");
+  };
+
+  System.prototype.queues = function(cb) {
+    cb = _.isFunction(cb) ? cb : null;
+    Queue.__list(this, (function(_this) {
+      return function(error, list) {
+        if (error != null) {
+          _this.emit("error", error);
+          return typeof cb === "function" ? cb(error) : void 0;
+        }
+        _this.emit("queues", list);
+        return typeof cb === "function" ? cb(null, list) : void 0;
       };
     })(this));
     return this;
   };
 
-  System.prototype.queue = function(name, options, cb) {
-    var err, error1, q;
+  System.prototype.queue = function(name, ifexists, options, cb) {
+    if (_.isFunction(ifexists)) {
+      cb = ifexists;
+      ifexists = false;
+      options = null;
+    } else {
+      ifexists = !!ifexists;
+    }
     if (_.isFunction(options)) {
       cb = options;
       options = null;
     }
-    try {
-      name = validateQNAME(name);
-      if (this._cache.hasOwnProperty(name)) {
-        q = this._cache[name];
-        this.emit("queue", q);
-        if (typeof cb === "function") {
-          cb(null, q);
-        }
-        return this;
-      }
-      q = Queue.getInstance(this);
-      q.on("created", (function(_this) {
-        return function(q) {
-          _this._cache[name] = q;
-          _this.emit("queue", q);
-          return typeof cb === "function" ? cb(null, q) : void 0;
-        };
-      })(this)).on("loaded", (function(_this) {
-        return function(q) {
-          _this._cache[name] = q;
-          _this.emit("queue", q);
-          return typeof cb === "function" ? cb(null, q) : void 0;
-        };
-      })(this)).on("not-found", (function(_this) {
-        return function(name) {
-          var err;
-          err = new Error("Queue [" + name + "] not found");
-          _this.emit("error", err);
-          return typeof cb === "function" ? cb(err, null) : void 0;
-        };
-      })(this)).on("error", (function(_this) {
-        return function(err) {
-          _this.emit("error", err);
-          return typeof cb === "function" ? cb(err, null) : void 0;
-        };
-      })(this)).on("exists", function(exists) {
-        if (exists) {
-          return q._load(null, name);
-        } else {
-          return q._create(null, name, options);
-        }
-      }).exists(null, name);
-    } catch (error1) {
-      err = error1;
-      this.emit("error", err);
-      if (typeof cb === "function") {
-        cb(err, this);
-      }
+    if ((options != null) && !_.isPlainObject(options)) {
+      throw new Error("Parameter [options] contains an Invalid Value");
     }
-    return this;
+    cb = _.isFunction(cb) ? cb : null;
+    return this._queue(name, false, options, cb);
   };
 
-  System.prototype.queueExists = function(name, cb) {
-    Queue.getInstance(this).exists(cb, name).on("exists", (function(_this) {
-      return function(exists) {
-        return _this.emit("queue-exists", name, exists);
+  System.prototype._queue = function(name, ifexists, options, cb) {
+    var wrapper;
+    name = validateQNAME(name);
+    wrapper = (function(_this) {
+      return function(error, q) {
+        if (error != null) {
+          _this.emit("error", error);
+          return typeof cb === "function" ? cb(error) : void 0;
+        }
+        _this.emit("queue", q);
+        return typeof cb === "function" ? cb(null, q) : void 0;
       };
-    })(this)).on("error", (function(_this) {
-      return function(err) {
-        return _this.emit("error", err);
-      };
-    })(this));
-    return this;
-  };
-
-  System.prototype.message = function(name, cb) {
-    var q;
-    q = Queue.getInstance(this);
-    return q.on("message", (function(_this) {
-      return function(msg) {
-        _this.emit("message", msg);
-        return typeof cb === "function" ? cb(null, msg) : void 0;
-      };
-    })(this)).on("loaded", function(queue) {
-      return q.receive;
-    }).on("not-found", (function(_this) {
-      return function(name) {
-        var err;
-        err = new Error("Queue [" + name + "] not found");
-        _this.emit("error", err);
-        return typeof cb === "function" ? cb(err, null) : void 0;
-      };
-    })(this)).on("error", (function(_this) {
-      return function(err) {
-        _this.emit("error", err);
-        return typeof cb === "function" ? cb(err, null) : void 0;
-      };
-    })(this))._load(null, name);
-  };
-
-  System.prototype.findMessage = function(id, name, active, cb) {
-    if (_.isFunction(active)) {
-      cb = active;
-      active = true;
+    })(this);
+    if (ifexists) {
+      Queue.__load(this, name, wrapper);
     } else {
-      active = !!active;
+      if (options != null) {
+        options = _.extend((_DEFAULTS.queue, _.pick(options, function(value, key) {
+          return ["htimeout", "etimeout", "plimit"].indexOf(key) > 0;
+        })));
+      } else {
+        options = _DEFAULTS.queue;
+      }
+      Queue.__loadOrCreate(this, name, options, wrapper);
     }
-    Message.getInstance(this).find(cb, id, name, active).on("found", (function(_this) {
-      return function(message) {
-        return _this.emit("message-found", message);
-      };
-    })(this)).on("error", (function(_this) {
-      return function(err) {
-        return _this.emit("error", err);
+    return this;
+  };
+
+  System.prototype.existsQueue = function(name, cb) {
+    name = validateQNAME(name);
+    cb = _.isFunction(cb) ? cb : null;
+    Queue.__exists(this, name, (function(_this) {
+      return function(error, exists) {
+        if (error != null) {
+          _this.emit("error", error);
+          return typeof cb === "function" ? cb(error) : void 0;
+        }
+        _this.emit("queue-exists", exists, name);
+        return typeof cb === "function" ? cb(null, exists, name) : void 0;
       };
     })(this));
+    return this;
+  };
+
+  System.prototype.find = function(id, name, active, cb) {
+    var wrapper;
+    if (name == null) {
+      name = null;
+    }
+    if (active == null) {
+      active = false;
+    }
+    if (_.isFunction(name)) {
+      cb = name;
+      active = false;
+      name = null;
+    } else if (_.isFunction(active)) {
+      cb = name;
+      active = false;
+    }
+    id = validateMID(id);
+    name = nullOnEmpty(name);
+    if (name != null) {
+      name = validateQNAME(name);
+    }
+    cb = _.isFunction(cb) ? cb : null;
+    wrapper = (function(_this) {
+      return function(error, m) {
+        if (error != null) {
+          _this.emit("error", error);
+          return typeof cb === "function" ? cb(error) : void 0;
+        }
+        _this.emit("found", m);
+        return typeof cb === "function" ? cb(null, m) : void 0;
+      };
+    })(this);
+    if (name != null) {
+      Message.__findInQueue(this.system, this.name, id, false, wrapper);
+    } else {
+      Message.__findInAll(this.system, id, false, wrapper);
+    }
     return this;
   };
 

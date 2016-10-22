@@ -562,7 +562,7 @@ class Queue extends EventEmitter
       commands = [
         [ "ZREM",  system._systemKey(["queue", queue, "M"]), id ]
         [ "ZADD",  system._systemKey(["queue", queue, "H"]), timeout, id ]
-        [ "HSET",  system._systemKey(["messages", queue]),   "hidden", 1 ]
+        [ "HSET",  system._systemKey(["messages", id]),   "hidden", 1 ]
       ]
 
       redis.multi(commands).exec (error, rcmds) ->

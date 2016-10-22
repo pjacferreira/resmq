@@ -511,7 +511,7 @@ Queue = (function(superClass) {
         return cb(error);
       }
       timeout = parseInt(rtime[0] + timeout, 10) * 1000000 + parseInt(rtime[1], 10);
-      commands = [["ZREM", system._systemKey(["queue", queue, "M"]), id], ["ZADD", system._systemKey(["queue", queue, "H"]), timeout, id], ["HSET", system._systemKey(["messages", queue]), "hidden", 1]];
+      commands = [["ZREM", system._systemKey(["queue", queue, "M"]), id], ["ZADD", system._systemKey(["queue", queue, "H"]), timeout, id], ["HSET", system._systemKey(["messages", id]), "hidden", 1]];
       return redis.multi(commands).exec(function(error, rcmds) {
         if (error != null) {
           return cb(error);

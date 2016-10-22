@@ -130,7 +130,7 @@ class Message extends EventEmitter
     redis = system._redis
 
     # Get REDIS Time
-    redis.time (err, rtime) ->
+    redis.time (error, rtime) ->
       if error? # HANDLE ERROR
         return cb error, null
 
@@ -511,7 +511,7 @@ class Queue extends EventEmitter
         [ "HINCRBY", _this.system._systemKey(["queue", queue, "P"]), "received", 1 ]
       ]
 
-      system.server.multi(commands).exec (err, rcmds) ->
+      system.server.multi(commands).exec (error, rcmds) ->
         if error? # HANDLE ERROR
           return cb error
 
@@ -702,7 +702,7 @@ class Queue extends EventEmitter
 
     Queue
       .__pending @system, @name, (error, ids) =>
-        if err? # HANDLE ERROR
+        if error? # HANDLE ERROR
           @emit "error", error
           return cb? error
 
@@ -893,7 +893,7 @@ class System extends EventEmitter
 
     wrapper = (error, q) =>
       # HANDLE ERROR
-      if err?
+      if error?
         @emit "error", error
         return cb? error, @
 

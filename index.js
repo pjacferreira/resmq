@@ -129,9 +129,9 @@ Message = (function(superClass) {
       props = {};
     }
     redis = system._redis;
-    return redis.time(function(err, rtime) {
+    return redis.time(function(error, rtime) {
       var commands, created, hmset, id;
-      if (typeof error !== "undefined" && error !== null) {
+      if (error != null) {
         return cb(error, null);
       }
       id = genID();
@@ -475,7 +475,7 @@ Queue = (function(superClass) {
       modified = parseInt(rtime[0], 10) * 1000000 + parseInt(rtime[1], 10);
       hmset = ["HMSET", system._systemKey(["messages", id]), "queue", queue, "hidden", 0, "modified", modified];
       commands = [hmset, ["ZADD", system._systemKey(["queue", queue, "M"]), modified, id], ["HINCRBY", _this.system._systemKey(["queue", queue, "P"]), "received", 1]];
-      return system.server.multi(commands).exec(function(err, rcmds) {
+      return system.server.multi(commands).exec(function(error, rcmds) {
         if (error != null) {
           return cb(error);
         }
@@ -634,7 +634,7 @@ Queue = (function(superClass) {
     Queue.__pending(this.system, this.name, (function(_this) {
       return function(error, ids) {
         var list;
-        if (typeof err !== "undefined" && err !== null) {
+        if (error != null) {
           _this.emit("error", error);
           return typeof cb === "function" ? cb(error) : void 0;
         }
@@ -825,7 +825,7 @@ System = (function(superClass) {
     cb = _.isFunction(cb) ? cb : null;
     wrapper = (function(_this) {
       return function(error, q) {
-        if (typeof err !== "undefined" && err !== null) {
+        if (error != null) {
           _this.emit("error", error);
           return typeof cb === "function" ? cb(error, _this) : void 0;
         }
